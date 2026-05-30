@@ -187,12 +187,43 @@ impl StyledImage for Stateful<Img> {
     }
 }
 
+/// Non-destructive UV transform applied to the sprite at render time.
+/// Cheap on the GPU — no decode or texture rewrite. Combine freely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ImageTransform {
+    /// 90° clockwise rotation quarters. Values outside 0..4 are taken `% 4`.
+    pub rotation_quarters: u8,
+    /// Mirror across the vertical axis.
+    pub flip_h: bool,
+    /// Mirror across the horizontal axis.
+    pub flip_v: bool,
+}
+
+impl ImageTransform {
+    /// Pack into the bit layout consumed by the renderer.
+    /// Bits 0-1 = rotation_quarters, bit 2 = flip_h, bit 3 = flip_v.
+    pub fn encode(&self) -> u32 {
+        let rot = (self.rotation_quarters % 4) as u32;
+        let h = if self.flip_h { 0x4 } else { 0 };
+        let v = if self.flip_v { 0x8 } else { 0 };
+        rot | h | v
+    }
+
+    /// True iff the transform exchanges width and height — i.e. rotation by
+    /// 90° or 270°. Layout (object-fit) needs to swap the texture's intrinsic
+    /// dimensions in that case.
+    pub fn swaps_axes(&self) -> bool {
+        self.rotation_quarters % 2 == 1
+    }
+}
+
 /// An image element.
 pub struct Img {
     interactivity: Interactivity,
     source: ImageSource,
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
+    transform: ImageTransform,
 }
 
 /// Create a new image element.
@@ -203,6 +234,7 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         source: source.into(),
         style: ImageStyle::default(),
         image_cache: None,
+        transform: ImageTransform::default(),
     }
 }
 
@@ -214,6 +246,13 @@ impl Img {
             "avif", "jpg", "jpeg", "png", "gif", "webp", "tif", "tiff", "tga", "dds", "bmp", "ico",
             "hdr", "exr", "pbm", "pam", "ppm", "pgm", "ff", "farbfeld", "qoi", "svg",
         ]
+    }
+
+    /// Apply a non-destructive transform (rotation in 90° increments, flips).
+    /// Performed on the GPU during sprite sampling — no decode, no allocation.
+    pub fn transform(mut self, transform: ImageTransform) -> Self {
+        self.transform = transform;
+        self
     }
 
     /// Sets the image cache for the current node.
@@ -344,7 +383,16 @@ impl Element for Img {
                                 frame_index = state.frame_index;
                             }
 
-                            let image_size = data.render_size(frame_index);
+                            let mut image_size = data.render_size(frame_index);
+                            // If the caller specified a UV transform that
+                            // swaps the texture's axes (90° / 270° rotation),
+                            // the *visible* aspect ratio is inverted. Use the
+                            // post-rotation aspect for layout so taffy sizes
+                            // the element to match what will actually be
+                            // drawn, not the underlying texture.
+                            if self.transform.swaps_axes() {
+                                std::mem::swap(&mut image_size.width, &mut image_size.height);
+                            }
                             style.aspect_ratio = Some(image_size.width / image_size.height);
 
                             if let Length::Auto = style.size.width {
@@ -482,14 +530,21 @@ impl Element for Img {
                     if data.frame_count() == 0 {
                         return;
                     }
-                    let new_bounds = self
-                        .style
-                        .object_fit
-                        .get_bounds(bounds, data.size(layout_state.frame_index));
+                    // Object-fit is computed against the *effective* texture
+                    // size, which swaps width/height when the UV transform
+                    // rotates 90° or 270°. Without this swap, fit calculates
+                    // against the unrotated texture and the rotated sample
+                    // ends up distorted in the bounds.
+                    let mut tex_size = data.size(layout_state.frame_index);
+                    if self.transform.swaps_axes() {
+                        std::mem::swap(&mut tex_size.width, &mut tex_size.height);
+                    }
+                    let new_bounds = self.style.object_fit.get_bounds(bounds, tex_size);
                     let corner_radii = style
                         .corner_radii
                         .to_pixels(window.rem_size())
                         .clamp_radii_for_quad_size(new_bounds.size);
+                    let uv_transform = self.transform.encode();
                     window
                         .paint_image(
                             new_bounds,
@@ -497,6 +552,7 @@ impl Element for Img {
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
+                            uv_transform,
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {

@@ -672,6 +672,23 @@ struct PolychromeSpriteFragmentInput {
   uint sprite_id [[flat]];
 };
 
+// Remap a unit-square corner (0..1 in x and y) by the packed PolychromeSprite
+// transform. Bits 0-1 = rotation_quarters (90° CW), bit 2 = flip_h, bit 3 = flip_v.
+// Used only for UV sampling; device position is unaffected.
+float2 apply_uv_transform(float2 v, uint t) {
+  bool flip_h = (t & 0x4u) != 0u;
+  bool flip_v = (t & 0x8u) != 0u;
+  if (flip_h) v.x = 1.0 - v.x;
+  if (flip_v) v.y = 1.0 - v.y;
+  uint rot = t & 0x3u;
+  v -= 0.5;
+  for (uint i = 0u; i < rot; i++) {
+    v = float2(-v.y, v.x);
+  }
+  v += 0.5;
+  return v;
+}
+
 vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
     uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
     constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
@@ -687,7 +704,8 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
       to_device_position(unit_vertex, sprite.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
                                                  sprite.content_mask.bounds);
-  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
+  float2 uv_vertex = apply_uv_transform(unit_vertex, sprite.uv_transform);
+  float2 tile_position = to_tile_position(uv_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
       tile_position,
@@ -1140,7 +1158,7 @@ float4 over(float4 below, float4 above) {
 GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
                                      Hsla color0, Hsla color1) {
   GradientColor out;
-  if (tag == 0 || tag == 2 || tag == 3) {
+  if (tag == 0 || tag == 2 || tag == 3 || tag == 4) {
     out.solid = hsla_to_rgba(solid);
   } else if (tag == 1) {
     out.color0 = hsla_to_rgba(color0);
@@ -1251,14 +1269,27 @@ float4 fill_color(Background background,
         // checkerboard
         float size = background.gradient_angle_or_pattern_height;
         float2 relative_position = position - float2(bounds.origin.x, bounds.origin.y);
-        
+
         float x_index = floor(relative_position.x / size);
         float y_index = floor(relative_position.y / size);
         float should_be_colored = fmod(x_index + y_index, 2.0);
-        
+
         color = solid_color;
         color.a *= saturate(should_be_colored);
-        break; 
+        break;
+    }
+    case 4: {
+        // procedural dot grid
+        float spacing = background.colors[0].percentage;
+        float radius = background.colors[1].percentage;
+        float2 relative_position = position - float2(bounds.origin.x, bounds.origin.y);
+        float2 cell = float2(fmod(relative_position.x, spacing), fmod(relative_position.y, spacing));
+        float2 to_center = cell - float2(spacing * 0.5);
+        float dist = length(to_center);
+        float dot_alpha = saturate(radius - dist + 0.5);
+        color = solid_color;
+        color.a *= dot_alpha;
+        break;
     }
   }
 

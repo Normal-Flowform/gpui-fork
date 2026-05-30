@@ -685,6 +685,7 @@ pub(crate) enum BackgroundTag {
     LinearGradient = 1,
     PatternSlash = 2,
     Checkerboard = 3,
+    Dots = 4,
 }
 
 /// A color space for color interpolation.
@@ -743,6 +744,11 @@ impl std::fmt::Debug for Background {
                 "Checkerboard({:?}, {})",
                 self.solid, self.gradient_angle_or_pattern_height
             ),
+            BackgroundTag::Dots => write!(
+                f,
+                "Dots({:?}, spacing={}, radius={})",
+                self.solid, self.colors[0].percentage, self.colors[1].percentage
+            ),
         }
     }
 }
@@ -781,6 +787,31 @@ pub fn checkerboard(color: impl Into<Hsla>, size: f32) -> Background {
         tag: BackgroundTag::Checkerboard,
         solid: color.into(),
         gradient_angle_or_pattern_height: size,
+        ..Default::default()
+    }
+}
+
+/// Creates a procedural dot-grid pattern background.
+///
+/// `spacing` is the screen-space distance between dot centers.
+/// `radius` is the dot radius in screen-space pixels.
+/// The dot lattice is anchored to `bounds.origin`, so panning is done by
+/// shifting the quad's origin (typically by `pan % spacing`) and expanding
+/// the quad by one tile of overdraw on each side.
+pub fn pattern_dots(color: impl Into<Hsla>, spacing: f32, radius: f32) -> Background {
+    Background {
+        tag: BackgroundTag::Dots,
+        solid: color.into(),
+        colors: [
+            LinearColorStop {
+                color: Hsla::default(),
+                percentage: spacing,
+            },
+            LinearColorStop {
+                color: Hsla::default(),
+                percentage: radius,
+            },
+        ],
         ..Default::default()
     }
 }
@@ -881,6 +912,7 @@ impl Background {
             BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
+            BackgroundTag::Dots => self.solid.is_transparent(),
         }
     }
 }

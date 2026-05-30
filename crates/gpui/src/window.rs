@@ -3747,6 +3747,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                uv_transform: 0,
             });
         }
         Ok(())
@@ -3828,6 +3829,7 @@ impl Window {
         data: Arc<RenderImage>,
         frame_index: usize,
         grayscale: bool,
+        uv_transform: u32,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -3862,6 +3864,7 @@ impl Window {
             corner_radii,
             tile,
             opacity,
+            uv_transform,
         });
         Ok(())
     }

@@ -702,6 +702,10 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    /// Packed UV transform applied to the sprite at render time. Bits 0-1 hold
+    /// 90° rotation quarters; bit 2 = flip horizontal; bit 3 = flip vertical.
+    /// 0 = identity.
+    pub uv_transform: u32,
 }
 
 impl From<PolychromeSprite> for Primitive {
