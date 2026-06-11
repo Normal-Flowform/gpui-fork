@@ -855,12 +855,18 @@ fragment float4 path_sprite_fragment(
 struct SurfaceVertexOutput {
   float4 position [[position]];
   float2 texture_position;
+  float2 fragment_position;
+  float4 bounds_packed;
+  float4 corner_radii_packed;
   float clip_distance [[clip_distance]][4];
 };
 
 struct SurfaceFragmentInput {
   float4 position [[position]];
   float2 texture_position;
+  float2 fragment_position;
+  float4 bounds_packed;
+  float4 corner_radii_packed;
 };
 
 vertex SurfaceVertexOutput surface_vertex(
@@ -877,12 +883,25 @@ vertex SurfaceVertexOutput surface_vertex(
       to_device_position(unit_vertex, surface.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds,
                                                  surface.content_mask.bounds);
-  // We are going to copy the whole texture, so the texture position corresponds
-  // to the current vertex of the unit triangle.
   float2 texture_position = unit_vertex;
+  float2 fragment_position =
+      float2(surface.bounds.origin.x, surface.bounds.origin.y) +
+      unit_vertex *
+          float2(surface.bounds.size.width, surface.bounds.size.height);
+  float4 bounds_packed = float4(surface.bounds.origin.x,
+                                surface.bounds.origin.y,
+                                surface.bounds.size.width,
+                                surface.bounds.size.height);
+  float4 corner_radii_packed = float4(surface.corner_radii.top_left,
+                                      surface.corner_radii.top_right,
+                                      surface.corner_radii.bottom_right,
+                                      surface.corner_radii.bottom_left);
   return SurfaceVertexOutput{
       device_position,
       texture_position,
+      fragment_position,
+      bounds_packed,
+      corner_radii_packed,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -891,6 +910,20 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
                                  [[texture(SurfaceInputIndex_YTexture)]],
                                  texture2d<float> cb_cr_texture
                                  [[texture(SurfaceInputIndex_CbCrTexture)]]) {
+  Bounds_ScaledPixels bounds;
+  bounds.origin.x = input.bounds_packed.x;
+  bounds.origin.y = input.bounds_packed.y;
+  bounds.size.width = input.bounds_packed.z;
+  bounds.size.height = input.bounds_packed.w;
+  Corners_ScaledPixels corner_radii;
+  corner_radii.top_left = input.corner_radii_packed.x;
+  corner_radii.top_right = input.corner_radii_packed.y;
+  corner_radii.bottom_right = input.corner_radii_packed.z;
+  corner_radii.bottom_left = input.corner_radii_packed.w;
+  float sdf = quad_sdf(input.fragment_position, bounds, corner_radii);
+  if (sdf > 0.5) {
+    discard_fragment();
+  }
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
   const float4x4 ycbcrToRGBTransform =
       float4x4(float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
@@ -901,7 +934,9 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
       y_texture.sample(texture_sampler, input.texture_position).r,
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
 
-  return ycbcrToRGBTransform * ycbcr;
+  float4 rgba = ycbcrToRGBTransform * ycbcr;
+  rgba.a *= saturate(0.5 - sdf);
+  return rgba;
 }
 
 float4 hsla_to_rgba(Hsla hsla) {
