@@ -2082,6 +2082,27 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 
     if let Some(mut event) = event {
+        // Measurement only: how long this event sat in AppKit's queue before
+        // reaching us. NSEvent timestamps share the systemUptime timebase.
+        // Sampled for drag-moves and scrolls — the interaction events where
+        // queue lag is perceived as input latency.
+        if matches!(
+            &event,
+            PlatformInput::MouseMove(MouseMoveEvent {
+                pressed_button: Some(_),
+                ..
+            }) | PlatformInput::ScrollWheel(_)
+        ) {
+            let age_secs = unsafe {
+                let event_ts: f64 = msg_send![native_event, timestamp];
+                let process_info: id = msg_send![class!(NSProcessInfo), processInfo];
+                let uptime: f64 = msg_send![process_info, systemUptime];
+                (uptime - event_ts).max(0.0)
+            };
+            crate::input_latency::INPUT_QUEUE_AGE
+                .record(std::time::Duration::from_secs_f64(age_secs));
+        }
+
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
         if matches!(
             event,

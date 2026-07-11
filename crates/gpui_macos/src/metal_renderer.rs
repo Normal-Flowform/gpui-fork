@@ -452,6 +452,9 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        // Measurement only: draw-entry → GPU completion, including any
+        // `next_drawable` wait (triple-buffer starvation shows up here).
+        let present_start = std::time::Instant::now();
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
@@ -479,6 +482,7 @@ impl MetalRenderer {
                         if let Some(instance_buffer) = instance_buffer.take() {
                             instance_buffer_pool.lock().release(instance_buffer);
                         }
+                        crate::input_latency::GPU_PRESENT.record(present_start.elapsed());
                     });
                     let block = block.copy();
                     command_buffer.add_completed_handler(&block);
