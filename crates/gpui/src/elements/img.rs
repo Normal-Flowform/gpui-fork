@@ -384,7 +384,7 @@ impl Element for Img {
 
                             if let Some(state) = &mut state {
                                 state.frame_index = state.frame_index.min(max_frame_index);
-                                if frame_count > 1 {
+                                if frame_count > 1 && !cx.reduce_motion() {
                                     if window.is_window_active() {
                                         let current_time = Instant::now();
                                         if let Some(last_frame_time) = state.last_frame_time {
@@ -454,6 +454,7 @@ impl Element for Img {
                             if global_id.is_some()
                                 && data.frame_count() > 1
                                 && window.is_window_active()
+                                && !cx.reduce_motion()
                             {
                                 window.request_animation_frame();
                             }
@@ -576,7 +577,9 @@ impl Element for Img {
                             ((i32::from(tex_size.width) as f32) * c[2]).round().max(1.0) as i32,
                         );
                         tex_size.height = DevicePixels(
-                            ((i32::from(tex_size.height) as f32) * c[3]).round().max(1.0) as i32,
+                            ((i32::from(tex_size.height) as f32) * c[3])
+                                .round()
+                                .max(1.0) as i32,
                         );
                     }
                     let new_bounds = self.style.object_fit.get_bounds(bounds, tex_size);
@@ -597,10 +600,8 @@ impl Element for Img {
                             / f32::from(new_bounds.size.width);
                         let fy = f32::from(visible.origin.y - new_bounds.origin.y)
                             / f32::from(new_bounds.size.height);
-                        let fw =
-                            f32::from(visible.size.width) / f32::from(new_bounds.size.width);
-                        let fh =
-                            f32::from(visible.size.height) / f32::from(new_bounds.size.height);
+                        let fw = f32::from(visible.size.width) / f32::from(new_bounds.size.width);
+                        let fh = f32::from(visible.size.height) / f32::from(new_bounds.size.height);
                         crop4 = [
                             crop4[0] + fx * crop4[2],
                             crop4[1] + fy * crop4[3],

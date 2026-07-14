@@ -112,8 +112,7 @@ impl Element for Surface {
         match &self.source {
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(surface) => {
-                let mut size =
-                    crate::size(surface.get_width().into(), surface.get_height().into());
+                let mut size = crate::size(surface.get_width().into(), surface.get_height().into());
                 // Fit math scales the cropped region, not the full frame.
                 let crop = super::img::sanitize_crop(self.crop);
                 if let Some(c) = crop {

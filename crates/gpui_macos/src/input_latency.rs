@@ -42,11 +42,7 @@ impl LatencyCounter {
         let sum = self.sum_ns.swap(0, Ordering::Relaxed);
         let max = self.max_ns.swap(0, Ordering::Relaxed);
         let count = self.count.swap(0, Ordering::Relaxed);
-        (
-            Duration::from_nanos(sum),
-            Duration::from_nanos(max),
-            count,
-        )
+        (Duration::from_nanos(sum), Duration::from_nanos(max), count)
     }
 }
 
