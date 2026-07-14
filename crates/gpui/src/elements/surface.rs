@@ -26,6 +26,7 @@ pub struct Surface {
     source: SurfaceSource,
     object_fit: ObjectFit,
     style: StyleRefinement,
+    crop: Option<Bounds<f32>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -43,6 +44,7 @@ pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
         source: source.into(),
         object_fit: ObjectFit::Contain,
         style: Default::default(),
+        crop: None,
     }
 }
 
@@ -50,6 +52,13 @@ impl Surface {
     /// Set the object fit for the image.
     pub fn object_fit(mut self, object_fit: ObjectFit) -> Self {
         self.object_fit = object_fit;
+        self
+    }
+
+    /// Show only a normalized sub-rect of the surface (0..1 in both axes).
+    /// Sampled on the GPU; object-fit sizes against the cropped region.
+    pub fn crop(mut self, crop: Bounds<f32>) -> Self {
+        self.crop = Some(crop);
         self
     }
 }
@@ -103,10 +112,45 @@ impl Element for Surface {
         match &self.source {
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(surface) => {
-                let size = crate::size(surface.get_width().into(), surface.get_height().into());
+                let mut size =
+                    crate::size(surface.get_width().into(), surface.get_height().into());
+                // Fit math scales the cropped region, not the full frame.
+                let crop = super::img::sanitize_crop(self.crop);
+                if let Some(c) = crop {
+                    size.width = crate::DevicePixels(
+                        ((i32::from(size.width) as f32) * c[2]).round().max(1.0) as i32,
+                    );
+                    size.height = crate::DevicePixels(
+                        ((i32::from(size.height) as f32) * c[3]).round().max(1.0) as i32,
+                    );
+                }
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
+                let mut crop4 = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                // Same as `img`: fold Cover-style overflow into the uv crop
+                // so corner radii round the VISIBLE corners, not the
+                // offscreen corners of an oversized quad.
+                let mut paint_bounds = new_bounds;
+                let visible = bounds.intersect(&new_bounds);
+                if visible != new_bounds
+                    && f32::from(new_bounds.size.width) > 0.0
+                    && f32::from(new_bounds.size.height) > 0.0
+                {
+                    let fx = f32::from(visible.origin.x - new_bounds.origin.x)
+                        / f32::from(new_bounds.size.width);
+                    let fy = f32::from(visible.origin.y - new_bounds.origin.y)
+                        / f32::from(new_bounds.size.height);
+                    let fw = f32::from(visible.size.width) / f32::from(new_bounds.size.width);
+                    let fh = f32::from(visible.size.height) / f32::from(new_bounds.size.height);
+                    crop4 = [
+                        crop4[0] + fx * crop4[2],
+                        crop4[1] + fy * crop4[3],
+                        crop4[2] * fw,
+                        crop4[3] * fh,
+                    ];
+                    paint_bounds = visible;
+                }
                 let corner_radii = style_corner_radii(&self.style, window);
-                window.paint_surface(new_bounds, corner_radii, surface.clone());
+                window.paint_surface(paint_bounds, corner_radii, surface.clone(), crop4);
             }
             #[allow(unreachable_patterns)]
             _ => {}

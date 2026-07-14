@@ -706,6 +706,10 @@ pub struct PolychromeSprite {
     /// 90° rotation quarters; bit 2 = flip horizontal; bit 3 = flip vertical.
     /// 0 = identity.
     pub uv_transform: u32,
+    /// Normalized crop rect `[x, y, w, h]` selecting the sub-region of the
+    /// sprite to sample, in DISPLAYED (post-uv_transform) orientation.
+    /// `[0, 0, 1, 1]` = the whole sprite.
+    pub crop: [f32; 4],
 }
 
 impl From<PolychromeSprite> for Primitive {
@@ -721,6 +725,9 @@ pub struct PaintSurface {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    /// Normalized crop rect `[x, y, w, h]` selecting the sub-region of the
+    /// surface to sample. `[0, 0, 1, 1]` = the whole surface.
+    pub crop: [f32; 4],
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
 }

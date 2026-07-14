@@ -1,8 +1,8 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
+    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, DevicePixels,
+    Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
+    RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
 use anyhow::Result;
 
@@ -217,6 +217,23 @@ impl ImageTransform {
     }
 }
 
+/// Clamp a normalized crop rect to the unit square and drop rects that are
+/// degenerate or the identity (renderers treat `[0,0,1,1]` as "no crop").
+pub(crate) fn sanitize_crop(crop: Option<Bounds<f32>>) -> Option<[f32; 4]> {
+    let c = crop?;
+    let x = c.origin.x.clamp(0.0, 1.0);
+    let y = c.origin.y.clamp(0.0, 1.0);
+    let w = c.size.width.clamp(0.0, 1.0 - x);
+    let h = c.size.height.clamp(0.0, 1.0 - y);
+    if w <= f32::EPSILON || h <= f32::EPSILON {
+        return None;
+    }
+    if x == 0.0 && y == 0.0 && w == 1.0 && h == 1.0 {
+        return None;
+    }
+    Some([x, y, w, h])
+}
+
 /// An image element.
 pub struct Img {
     interactivity: Interactivity,
@@ -224,6 +241,7 @@ pub struct Img {
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
     transform: ImageTransform,
+    crop: Option<Bounds<f32>>,
 }
 
 /// Create a new image element.
@@ -235,6 +253,7 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         style: ImageStyle::default(),
         image_cache: None,
         transform: ImageTransform::default(),
+        crop: None,
     }
 }
 
@@ -252,6 +271,15 @@ impl Img {
     /// Performed on the GPU during sprite sampling — no decode, no allocation.
     pub fn transform(mut self, transform: ImageTransform) -> Self {
         self.transform = transform;
+        self
+    }
+
+    /// Show only a normalized sub-rect of the image (0..1 in both axes, in
+    /// the DISPLAYED orientation — i.e. after any `transform`). Sampled on
+    /// the GPU; object-fit sizes against the cropped region, not the full
+    /// texture. Out-of-range rects are clamped; zero-size rects are ignored.
+    pub fn crop(mut self, crop: Bounds<f32>) -> Self {
+        self.crop = Some(crop);
         self
     }
 
@@ -539,20 +567,62 @@ impl Element for Img {
                     if self.transform.swaps_axes() {
                         std::mem::swap(&mut tex_size.width, &mut tex_size.height);
                     }
+                    // A crop narrows the effective texture: fit math uses the
+                    // cropped region's dimensions so Cover/Contain scale the
+                    // visible sub-rect, not the full sprite.
+                    let crop = sanitize_crop(self.crop);
+                    if let Some(c) = crop {
+                        tex_size.width = DevicePixels(
+                            ((i32::from(tex_size.width) as f32) * c[2]).round().max(1.0) as i32,
+                        );
+                        tex_size.height = DevicePixels(
+                            ((i32::from(tex_size.height) as f32) * c[3]).round().max(1.0) as i32,
+                        );
+                    }
                     let new_bounds = self.style.object_fit.get_bounds(bounds, tex_size);
+                    let mut crop4 = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                    // Overflowing fits (Cover / None) would paint an
+                    // oversized quad whose corner radii round OFFSCREEN
+                    // corners — the element clip is rectangular, so the
+                    // visible corners come out square. Fold the overflow
+                    // into the uv crop instead: the quad stays exactly the
+                    // visible bounds and the radii round what the user sees.
+                    let mut paint_bounds = new_bounds;
+                    let visible = bounds.intersect(&new_bounds);
+                    if visible != new_bounds
+                        && f32::from(new_bounds.size.width) > 0.0
+                        && f32::from(new_bounds.size.height) > 0.0
+                    {
+                        let fx = f32::from(visible.origin.x - new_bounds.origin.x)
+                            / f32::from(new_bounds.size.width);
+                        let fy = f32::from(visible.origin.y - new_bounds.origin.y)
+                            / f32::from(new_bounds.size.height);
+                        let fw =
+                            f32::from(visible.size.width) / f32::from(new_bounds.size.width);
+                        let fh =
+                            f32::from(visible.size.height) / f32::from(new_bounds.size.height);
+                        crop4 = [
+                            crop4[0] + fx * crop4[2],
+                            crop4[1] + fy * crop4[3],
+                            crop4[2] * fw,
+                            crop4[3] * fh,
+                        ];
+                        paint_bounds = visible;
+                    }
                     let corner_radii = style
                         .corner_radii
                         .to_pixels(window.rem_size())
-                        .clamp_radii_for_quad_size(new_bounds.size);
+                        .clamp_radii_for_quad_size(paint_bounds.size);
                     let uv_transform = self.transform.encode();
                     window
                         .paint_image(
-                            new_bounds,
+                            paint_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
                             uv_transform,
+                            crop4,
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {

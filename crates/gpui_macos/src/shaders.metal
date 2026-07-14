@@ -704,7 +704,12 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
       to_device_position(unit_vertex, sprite.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
                                                  sprite.content_mask.bounds);
-  float2 uv_vertex = apply_uv_transform(unit_vertex, sprite.uv_transform);
+  // Crop first (it is authored in displayed orientation), then remap by the
+  // packed rotation/flip transform into source-texture uv space.
+  float2 cropped_vertex =
+      float2(sprite.crop[0] + unit_vertex.x * sprite.crop[2],
+             sprite.crop[1] + unit_vertex.y * sprite.crop[3]);
+  float2 uv_vertex = apply_uv_transform(cropped_vertex, sprite.uv_transform);
   float2 tile_position = to_tile_position(uv_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
@@ -883,7 +888,10 @@ vertex SurfaceVertexOutput surface_vertex(
       to_device_position(unit_vertex, surface.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds,
                                                  surface.content_mask.bounds);
-  float2 texture_position = unit_vertex;
+  // Sample only the normalized crop sub-rect of the video frame.
+  float2 texture_position =
+      float2(surface.crop[0] + unit_vertex.x * surface.crop[2],
+             surface.crop[1] + unit_vertex.y * surface.crop[3]);
   float2 fragment_position =
       float2(surface.bounds.origin.x, surface.bounds.origin.y) +
       unit_vertex *

@@ -1475,6 +1475,7 @@ impl MetalRenderer {
                         bounds: surface.bounds,
                         content_mask: surface.content_mask.clone(),
                         corner_radii: surface.corner_radii.clone(),
+                        crop: surface.crop,
                     },
                 );
             }
@@ -1677,12 +1678,14 @@ pub struct PathSprite {
     pub bounds: Bounds<ScaledPixels>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    /// Normalized crop rect `[x, y, w, h]`; `[0, 0, 1, 1]` = whole surface.
+    pub crop: [f32; 4],
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -3748,6 +3748,7 @@ impl Window {
                 tile,
                 opacity,
                 uv_transform: 0,
+                crop: [0.0, 0.0, 1.0, 1.0],
             });
         }
         Ok(())
@@ -3830,6 +3831,7 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
         uv_transform: u32,
+        crop: [f32; 4],
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -3865,6 +3867,7 @@ impl Window {
             tile,
             opacity,
             uv_transform,
+            crop,
         });
         Ok(())
     }
@@ -3878,6 +3881,7 @@ impl Window {
         bounds: Bounds<Pixels>,
         corner_radii: crate::Corners<Pixels>,
         image_buffer: CVPixelBuffer,
+        crop: [f32; 4],
     ) {
         use crate::PaintSurface;
 
@@ -3893,6 +3897,7 @@ impl Window {
             bounds: snapped_bounds,
             content_mask,
             corner_radii,
+            crop,
             image_buffer,
         });
     }
