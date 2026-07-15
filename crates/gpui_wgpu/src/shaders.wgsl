@@ -1270,8 +1270,31 @@ struct PolychromeSprite {
     content_mask: Bounds,
     corner_radii: Corners,
     tile: AtlasTile,
+    uv_transform: u32,
+    // Use an array rather than vec4 so its storage alignment matches Rust's
+    // repr(C) [f32; 4] immediately following uv_transform.
+    crop: array<f32, 4>,
 }
 @group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
+
+// Crop is authored in displayed orientation. Then map the displayed UV back
+// into source texture space using the inverse of the requested CW rotation.
+fn apply_uv_transform(input: vec2<f32>, transform: u32) -> vec2<f32> {
+    var v = input;
+    if ((transform & 0x4u) != 0u) {
+        v.x = 1.0 - v.x;
+    }
+    if ((transform & 0x8u) != 0u) {
+        v.y = 1.0 - v.y;
+    }
+
+    switch (transform & 0x3u) {
+        case 1u: { return vec2<f32>(v.y, 1.0 - v.x); }
+        case 2u: { return 1.0 - v; }
+        case 3u: { return vec2<f32>(1.0 - v.y, v.x); }
+        default: { return v; }
+    }
+}
 
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
@@ -1287,7 +1310,12 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
     var out = PolySpriteVarying();
     out.position = to_device_position(unit_vertex, sprite.bounds);
-    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    let cropped_vertex = vec2<f32>(
+        sprite.crop[0] + unit_vertex.x * sprite.crop[2],
+        sprite.crop[1] + unit_vertex.y * sprite.crop[3],
+    );
+    let uv_vertex = apply_uv_transform(cropped_vertex, sprite.uv_transform);
+    out.tile_position = to_tile_position(uv_vertex, sprite.tile);
     out.sprite_id = instance_id;
     out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
     return out;

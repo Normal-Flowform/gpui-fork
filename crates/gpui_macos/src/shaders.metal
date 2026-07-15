@@ -696,7 +696,9 @@ float2 apply_uv_transform(float2 v, uint t) {
   uint rot = t & 0x3u;
   v -= 0.5;
   for (uint i = 0u; i < rot; i++) {
-    v = float2(-v.y, v.x);
+    // UVs map output positions back into the source texture, so the sampling
+    // transform is the inverse of the requested clockwise display rotation.
+    v = float2(v.y, -v.x);
   }
   v += 0.5;
   return v;

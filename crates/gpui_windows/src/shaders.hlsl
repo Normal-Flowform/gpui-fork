@@ -1210,7 +1210,23 @@ struct PolychromeSprite {
     Bounds content_mask;
     Corners corner_radii;
     AtlasTile tile;
+    uint uv_transform;
+    float crop[4];
 };
+
+// Crop is authored in displayed orientation. Then map the displayed UV back
+// into source texture space using the inverse of the requested CW rotation.
+float2 apply_uv_transform(float2 v, uint transform) {
+    if ((transform & 0x4u) != 0u) v.x = 1.0f - v.x;
+    if ((transform & 0x8u) != 0u) v.y = 1.0f - v.y;
+
+    switch (transform & 0x3u) {
+        case 1u: return float2(v.y, 1.0f - v.x);
+        case 2u: return 1.0f - v;
+        case 3u: return float2(1.0f - v.y, v.x);
+        default: return v;
+    }
+}
 
 struct PolychromeSpriteVertexOutput {
     nointerpolation uint sprite_id: TEXCOORD0;
@@ -1233,7 +1249,12 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
     float4 device_position = to_device_position(unit_vertex, sprite.bounds);
     float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
                                                     sprite.content_mask);
-    float2 tile_position = to_tile_position(unit_vertex, sprite.tile);
+    float2 cropped_vertex = float2(
+        sprite.crop[0] + unit_vertex.x * sprite.crop[2],
+        sprite.crop[1] + unit_vertex.y * sprite.crop[3]
+    );
+    float2 uv_vertex = apply_uv_transform(cropped_vertex, sprite.uv_transform);
+    float2 tile_position = to_tile_position(uv_vertex, sprite.tile);
 
     PolychromeSpriteVertexOutput output;
     output.position = device_position;
