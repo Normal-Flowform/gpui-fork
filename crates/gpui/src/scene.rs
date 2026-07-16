@@ -718,6 +718,9 @@ pub struct PolychromeSprite {
     pub grayscale: PaddedBool32,
     pub opacity: f32,
     pub bounds: Bounds<ScaledPixels>,
+    /// Visible viewport used by the rounded-corner SDF. Cover may paint an
+    /// oversized sampling quad while rounding this fixed intersection.
+    pub clip_bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
