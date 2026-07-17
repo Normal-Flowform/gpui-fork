@@ -421,7 +421,18 @@ impl Element for Img {
                             if self.transform.swaps_axes() {
                                 std::mem::swap(&mut image_size.width, &mut image_size.height);
                             }
-                            style.aspect_ratio = Some(image_size.width / image_size.height);
+                            // The decoded image ratio is intrinsic sizing data, not
+                            // an override for a caller-specified box. When both axes
+                            // are definite (including percentages such as
+                            // `size_full()`), preserve that box and let ObjectFit
+                            // place the pixels inside it. Taffy otherwise uses this
+                            // ratio to recompute the height from the width, which can
+                            // push the image's bottom edge beyond its parent's clip.
+                            let width_is_auto = matches!(style.size.width, Length::Auto);
+                            let height_is_auto = matches!(style.size.height, Length::Auto);
+                            if style.aspect_ratio.is_none() && (width_is_auto || height_is_auto) {
+                                style.aspect_ratio = Some(image_size.width / image_size.height);
+                            }
 
                             if let Length::Auto = style.size.width {
                                 style.size.width = match style.size.height {
@@ -582,42 +593,18 @@ impl Element for Img {
                                 .max(1.0) as i32,
                         );
                     }
-                    let new_bounds = self.style.object_fit.get_bounds(bounds, tex_size);
-                    let mut crop4 = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
-                    // Overflowing fits (Cover / None) would paint an
-                    // oversized quad whose corner radii round OFFSCREEN
-                    // corners — the element clip is rectangular, so the
-                    // visible corners come out square. Fold the overflow
-                    // into the uv crop instead: the quad stays exactly the
-                    // visible bounds and the radii round what the user sees.
-                    let mut paint_bounds = new_bounds;
-                    let visible = bounds.intersect(&new_bounds);
-                    if visible != new_bounds
-                        && f32::from(new_bounds.size.width) > 0.0
-                        && f32::from(new_bounds.size.height) > 0.0
-                    {
-                        let fx = f32::from(visible.origin.x - new_bounds.origin.x)
-                            / f32::from(new_bounds.size.width);
-                        let fy = f32::from(visible.origin.y - new_bounds.origin.y)
-                            / f32::from(new_bounds.size.height);
-                        let fw = f32::from(visible.size.width) / f32::from(new_bounds.size.width);
-                        let fh = f32::from(visible.size.height) / f32::from(new_bounds.size.height);
-                        crop4 = [
-                            crop4[0] + fx * crop4[2],
-                            crop4[1] + fy * crop4[3],
-                            crop4[2] * fw,
-                            crop4[3] * fh,
-                        ];
-                        paint_bounds = visible;
-                    }
+                    let paint_bounds = self.style.object_fit.get_bounds(bounds, tex_size);
+                    let clip_bounds = paint_bounds.intersect(&bounds);
+                    let crop4 = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
                     let corner_radii = style
                         .corner_radii
                         .to_pixels(window.rem_size())
-                        .clamp_radii_for_quad_size(paint_bounds.size);
+                        .clamp_radii_for_quad_size(clip_bounds.size);
                     let uv_transform = self.transform.encode();
                     window
                         .paint_image(
                             paint_bounds,
+                            clip_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,

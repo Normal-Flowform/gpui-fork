@@ -136,6 +136,67 @@ impl ObjectFit {
             },
         }
     }
+
+    /// Resolve the painted quad and normalized source crop together. Cover
+    /// keeps the quad at the element bounds and crops the sampled texture;
+    /// its rounded corners therefore belong to the visible rectangle instead
+    /// of an oversized offscreen quad.
+    pub(crate) fn get_bounds_and_crop(
+        &self,
+        bounds: Bounds<Pixels>,
+        image_size: Size<DevicePixels>,
+        crop: [f32; 4],
+    ) -> (Bounds<Pixels>, [f32; 4]) {
+        if matches!(self, ObjectFit::Cover) {
+            let image_width = u32::from(image_size.width).max(1) as f32;
+            let image_height = u32::from(image_size.height).max(1) as f32;
+            let bounds_width = f32::from(bounds.size.width).max(1.0);
+            let bounds_height = f32::from(bounds.size.height).max(1.0);
+            let image_ratio = image_width / image_height;
+            let bounds_ratio = bounds_width / bounds_height;
+            let (local_x, local_y, local_width, local_height) = if image_ratio > bounds_ratio {
+                let width = bounds_ratio / image_ratio;
+                ((1.0 - width) / 2.0, 0.0, width, 1.0)
+            } else {
+                let height = image_ratio / bounds_ratio;
+                (0.0, (1.0 - height) / 2.0, 1.0, height)
+            };
+            return (
+                bounds,
+                [
+                    crop[0] + local_x * crop[2],
+                    crop[1] + local_y * crop[3],
+                    crop[2] * local_width,
+                    crop[3] * local_height,
+                ],
+            );
+        }
+
+        let fitted_bounds = self.get_bounds(bounds, image_size);
+        let visible = bounds.intersect(&fitted_bounds);
+        if visible == fitted_bounds
+            || f32::from(fitted_bounds.size.width) <= 0.0
+            || f32::from(fitted_bounds.size.height) <= 0.0
+        {
+            return (fitted_bounds, crop);
+        }
+
+        let local_x = f32::from(visible.origin.x - fitted_bounds.origin.x)
+            / f32::from(fitted_bounds.size.width);
+        let local_y = f32::from(visible.origin.y - fitted_bounds.origin.y)
+            / f32::from(fitted_bounds.size.height);
+        let local_width = f32::from(visible.size.width) / f32::from(fitted_bounds.size.width);
+        let local_height = f32::from(visible.size.height) / f32::from(fitted_bounds.size.height);
+        (
+            visible,
+            [
+                crop[0] + local_x * crop[2],
+                crop[1] + local_y * crop[3],
+                crop[2] * local_width,
+                crop[3] * local_height,
+            ],
+        )
+    }
 }
 
 /// The minimum size of a column or row in a grid layout
@@ -1332,6 +1393,32 @@ mod tests {
     use super::*;
 
     use util_macros::perf;
+
+    #[test]
+    fn cover_paints_the_visible_bounds_and_crops_the_texture() {
+        let bounds = Bounds::from_corners(point(px(0.), px(0.)), point(px(1000.), px(500.)));
+        let (paint_bounds, crop) = ObjectFit::Cover.get_bounds_and_crop(
+            bounds,
+            size(DevicePixels(1000), DevicePixels(1000)),
+            [0.0, 0.0, 1.0, 1.0],
+        );
+
+        assert_eq!(paint_bounds, bounds);
+        assert_eq!(crop, [0.0, 0.25, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn cover_composes_with_an_existing_crop() {
+        let bounds = Bounds::from_corners(point(px(0.), px(0.)), point(px(500.), px(1000.)));
+        let (paint_bounds, crop) = ObjectFit::Cover.get_bounds_and_crop(
+            bounds,
+            size(DevicePixels(1000), DevicePixels(500)),
+            [0.1, 0.2, 0.8, 0.6],
+        );
+
+        assert_eq!(paint_bounds, bounds);
+        assert_eq!(crop, [0.4, 0.2, 0.2, 0.6]);
+    }
 
     #[perf]
     fn test_basic_highlight_style_combination() {
