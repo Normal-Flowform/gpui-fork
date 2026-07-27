@@ -1,7 +1,11 @@
 use crate::{
-    App, Bounds, Corners, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
+    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
 };
+// Rounded surface corners are only painted by the macOS surface pipeline; the
+// other backends have no surface primitive to round.
+#[cfg(target_os = "macos")]
+use crate::Corners;
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use refineable::Refineable;
