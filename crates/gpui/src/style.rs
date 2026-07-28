@@ -141,6 +141,11 @@ impl ObjectFit {
     /// keeps the quad at the element bounds and crops the sampled texture;
     /// its rounded corners therefore belong to the visible rectangle instead
     /// of an oversized offscreen quad.
+    ///
+    /// Only the macOS surface element consumes this; images fold cover
+    /// overflow into `clip_bounds` instead. Gated so non-macOS builds do not
+    /// warn about dead code.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn get_bounds_and_crop(
         &self,
         bounds: Bounds<Pixels>,

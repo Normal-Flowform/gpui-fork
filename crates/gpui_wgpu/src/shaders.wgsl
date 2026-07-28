@@ -405,7 +405,7 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     solid: Hsla, colors: array<LinearColorStop, 2>) -> GradientColor {
     var result = GradientColor();
 
-    if (tag == 0u || tag == 2u || tag == 3u) {
+    if (tag == 0u || tag == 2u || tag == 3u || tag == 4u) {
         result.solid = hsla_to_rgba(solid);
     } else if (tag == 1u) {
         // The hsla_to_rgba is returns a linear sRGB color
@@ -508,6 +508,18 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             background_color = solid_color;
             background_color.a *= saturate(should_be_colored);
+        }
+        case 4u: {
+            // procedural dot grid
+            let spacing = background.colors[0].percentage;
+            let radius = background.colors[1].percentage;
+            let relative_position = position - bounds.origin;
+            let cell = vec2<f32>(relative_position.x % spacing, relative_position.y % spacing);
+            let to_center = cell - vec2<f32>(spacing * 0.5);
+            let dist = length(to_center);
+            let dot_alpha = saturate(radius - dist + 0.5);
+            background_color = solid_color;
+            background_color.a *= dot_alpha;
         }
     }
 

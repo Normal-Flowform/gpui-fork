@@ -52,6 +52,8 @@ struct Background {
     // 0u is Solid
     // 1u is LinearGradient
     // 2u is PatternSlash
+    // 3u is Checkerboard
+    // 4u is Dots
     uint tag;
     // 0u is sRGB linear color
     // 1u is Oklab color
@@ -311,7 +313,7 @@ float quad_sdf(float2 pt, Bounds bounds, Corners corner_radii) {
 
 GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, LinearColorStop colors[2]) {
     GradientColor output;
-    if (tag == 0 || tag == 2 || tag == 3) {
+    if (tag == 0 || tag == 2 || tag == 3 || tag == 4) {
         output.solid = hsla_to_rgba(solid);
     } else if (tag == 1) {
         output.color0 = hsla_to_rgba(colors[0].color);
@@ -429,6 +431,19 @@ float4 gradient_color(Background background,
 
             color = solid_color;
             color.a *= saturate(should_be_colored);
+            break;
+        }
+        case 4: {
+            // procedural dot grid
+            float spacing = background.colors[0].percentage;
+            float radius = background.colors[1].percentage;
+            float2 relative_position = position - bounds.origin;
+            float2 cell = float2(fmod(relative_position.x, spacing), fmod(relative_position.y, spacing));
+            float2 to_center = cell - spacing * 0.5f;
+            float dist = length(to_center);
+            float dot_alpha = saturate(radius - dist + 0.5f);
+            color = solid_color;
+            color.a *= dot_alpha;
             break;
         }
     }
