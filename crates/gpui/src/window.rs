@@ -1632,8 +1632,17 @@ impl Window {
             Box::new(move || {
                 handle
                     .update(&mut cx, |_, window, _cx| {
+                        // Answer from the live cursor position rather than the
+                        // cached `mouse_hit_test`. `WM_NCHITTEST` is a
+                        // synchronous query that Windows sends *before* the
+                        // `WM_NCMOUSEMOVE` which refreshes that cache, so the
+                        // cache trails the cursor by the whole pending input
+                        // backlog and a caption-button click is answered as
+                        // `HTCAPTION`.
+                        let position = window.platform_window.mouse_position();
+                        let hit_test = window.rendered_frame.hit_test(position);
                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            if window.mouse_hit_test.ids.contains(&hitbox.id) {
+                            if hit_test.ids.contains(&hitbox.id) {
                                 return Some(*area);
                             }
                         }

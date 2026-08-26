@@ -905,6 +905,26 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
+    /// Windows toggles maximize and restore when the caption is double-clicked.
+    /// The app draws its own caption and consumes that click, so
+    /// `DefWindowProcW` never sees it and this fallback owns the gesture.
+    /// Unlike macOS there is no user preference for the action.
+    fn titlebar_double_click(&self) {
+        if !self.is_resizable {
+            return;
+        }
+        unsafe {
+            if IsWindowVisible(self.0.hwnd).as_bool() {
+                let command = if self.state.is_maximized() {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                };
+                ShowWindowAsync(self.0.hwnd, command).ok().log_err();
+            }
+        }
+    }
+
     fn toggle_fullscreen(&self) {
         if unsafe { IsWindowVisible(self.0.hwnd).as_bool() } {
             self.0.toggle_fullscreen();
