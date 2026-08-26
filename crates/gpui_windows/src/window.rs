@@ -918,6 +918,38 @@ impl PlatformWindow for WindowsWindow {
         self.state.is_fullscreen()
     }
 
+    /// Start the system move loop for an app-drawn titlebar.
+    ///
+    /// `handle_hit_test_msg` already reports `HTCAPTION` over a
+    /// [`WindowControlArea::Drag`] region, but an app that consumes the
+    /// resulting `WM_NCLBUTTONDOWN` stops `DefWindowProcW` from ever starting
+    /// that loop, leaving the window undraggable.
+    ///
+    /// Post `SC_MOVE` rather than replaying the message. Re-posting
+    /// `WM_NCLBUTTONDOWN` re-enters `handle_nc_mouse_down_msg` and is consumed
+    /// again, and handing it to `DefWindowProcW` from here does nothing: that
+    /// modal move loop is entered while still nested inside this window's own
+    /// `WM_NCLBUTTONDOWN` dispatch and never tracks the drag. `SC_MOVE` is
+    /// intercepted nowhere in this backend, so posting it reaches the default
+    /// proc after this call returns and the input callback is restored.
+    ///
+    /// The loop anchors on the cursor position at the moment it starts rather
+    /// than on the original press, so a drag begun far from the press point
+    /// shifts by that difference. Real presses start the loop within a frame,
+    /// where the difference is not observable.
+    fn start_window_move(&self) {
+        unsafe {
+            ReleaseCapture().log_err();
+            PostMessageW(
+                Some(self.0.hwnd),
+                WM_SYSCOMMAND,
+                WPARAM((SC_MOVE | HTCAPTION) as usize),
+                LPARAM::default(),
+            )
+            .log_err();
+        }
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.state.callbacks.request_frame.set(Some(callback));
     }
