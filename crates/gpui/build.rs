@@ -13,11 +13,29 @@ fn main() {
 
 #[cfg(feature = "windows-manifest")]
 fn embed_resource() {
-    let manifest = std::path::Path::new("resources/windows/gpui.manifest.xml");
-    let rc_file = std::path::Path::new("resources/windows/gpui.rc");
+    let crate_root = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
+    );
+    let manifest = crate_root.join("resources/windows/gpui.manifest.xml");
+    let rc_file = crate_root.join("resources/windows/gpui.rc");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", rc_file.display());
-    embed_resource::compile(rc_file, embed_resource::NONE)
+
+    // `embed-resource` preprocesses the RC file into OUT_DIR. Resource
+    // compilers then resolve quoted payload paths relative to that generated
+    // file, not the crate, which breaks cross-builds and out-of-tree targets.
+    let rc_template = std::fs::read_to_string(&rc_file).expect("gpui.rc is checked into the crate");
+    let manifest_path = manifest.to_string_lossy().replace('\\', "/");
+    let generated_rc = rc_template.replace(
+        "resources/windows/gpui.manifest.xml",
+        manifest_path.as_str(),
+    );
+    let generated_rc_path =
+        std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"))
+            .join("gpui.rc");
+    std::fs::write(&generated_rc_path, generated_rc).expect("write generated gpui.rc");
+
+    embed_resource::compile(generated_rc_path, embed_resource::NONE)
         .manifest_required()
         .unwrap();
 }

@@ -905,6 +905,26 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
+    /// Windows toggles maximize and restore when the caption is double-clicked.
+    /// The app draws its own caption and consumes that click, so
+    /// `DefWindowProcW` never sees it and this fallback owns the gesture.
+    /// Unlike macOS there is no user preference for the action.
+    fn titlebar_double_click(&self) {
+        if !self.is_resizable {
+            return;
+        }
+        unsafe {
+            if IsWindowVisible(self.0.hwnd).as_bool() {
+                let command = if self.state.is_maximized() {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                };
+                ShowWindowAsync(self.0.hwnd, command).ok().log_err();
+            }
+        }
+    }
+
     fn toggle_fullscreen(&self) {
         if unsafe { IsWindowVisible(self.0.hwnd).as_bool() } {
             self.0.toggle_fullscreen();
@@ -916,6 +936,38 @@ impl PlatformWindow for WindowsWindow {
 
     fn is_fullscreen(&self) -> bool {
         self.state.is_fullscreen()
+    }
+
+    /// Start the system move loop for an app-drawn titlebar.
+    ///
+    /// `handle_hit_test_msg` already reports `HTCAPTION` over a
+    /// [`WindowControlArea::Drag`] region, but an app that consumes the
+    /// resulting `WM_NCLBUTTONDOWN` stops `DefWindowProcW` from ever starting
+    /// that loop, leaving the window undraggable.
+    ///
+    /// Post `SC_MOVE` rather than replaying the message. Re-posting
+    /// `WM_NCLBUTTONDOWN` re-enters `handle_nc_mouse_down_msg` and is consumed
+    /// again, and handing it to `DefWindowProcW` from here does nothing: that
+    /// modal move loop is entered while still nested inside this window's own
+    /// `WM_NCLBUTTONDOWN` dispatch and never tracks the drag. `SC_MOVE` is
+    /// intercepted nowhere in this backend, so posting it reaches the default
+    /// proc after this call returns and the input callback is restored.
+    ///
+    /// The loop anchors on the cursor position at the moment it starts rather
+    /// than on the original press, so a drag begun far from the press point
+    /// shifts by that difference. Real presses start the loop within a frame,
+    /// where the difference is not observable.
+    fn start_window_move(&self) {
+        unsafe {
+            ReleaseCapture().log_err();
+            PostMessageW(
+                Some(self.0.hwnd),
+                WM_SYSCOMMAND,
+                WPARAM((SC_MOVE | HTCAPTION) as usize),
+                LPARAM::default(),
+            )
+            .log_err();
+        }
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
