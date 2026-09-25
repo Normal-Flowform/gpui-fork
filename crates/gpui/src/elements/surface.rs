@@ -124,30 +124,15 @@ impl Element for Surface {
                     );
                 }
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
-                let mut crop4 = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
                 // Same as `img`: fold Cover-style overflow into the uv crop
                 // so corner radii round the VISIBLE corners, not the
                 // offscreen corners of an oversized quad.
-                let mut paint_bounds = new_bounds;
-                let visible = bounds.intersect(&new_bounds);
-                if visible != new_bounds
-                    && f32::from(new_bounds.size.width) > 0.0
-                    && f32::from(new_bounds.size.height) > 0.0
-                {
-                    let fx = f32::from(visible.origin.x - new_bounds.origin.x)
-                        / f32::from(new_bounds.size.width);
-                    let fy = f32::from(visible.origin.y - new_bounds.origin.y)
-                        / f32::from(new_bounds.size.height);
-                    let fw = f32::from(visible.size.width) / f32::from(new_bounds.size.width);
-                    let fh = f32::from(visible.size.height) / f32::from(new_bounds.size.height);
-                    crop4 = [
-                        crop4[0] + fx * crop4[2],
-                        crop4[1] + fy * crop4[3],
-                        crop4[2] * fw,
-                        crop4[3] * fh,
-                    ];
-                    paint_bounds = visible;
-                }
+                let paint_bounds = bounds.intersect(&new_bounds);
+                let crop4 = super::img::fold_overflow_into_crop(
+                    paint_bounds,
+                    new_bounds,
+                    crop.unwrap_or([0.0, 0.0, 1.0, 1.0]),
+                );
                 let corner_radii = style_corner_radii(&self.style, window);
                 window.paint_surface(paint_bounds, corner_radii, surface.clone(), crop4);
             }

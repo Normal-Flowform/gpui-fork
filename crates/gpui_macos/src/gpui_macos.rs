@@ -8,17 +8,26 @@ mod dispatcher;
 mod display;
 mod display_link;
 mod events;
-pub mod input_latency;
 mod keyboard;
 mod pasteboard;
+mod system_notifications;
 
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
 
-mod metal_atlas;
-pub mod metal_renderer;
+use gpui_apple::metal_renderer as renderer;
 
-use metal_renderer as renderer;
+/// Flowform: input-latency counters. The GPU-present counter is recorded by
+/// the shared Metal renderer in `gpui_apple`, so the module lives there and is
+/// re-exported here to keep the `gpui_macos::input_latency` path stable.
+pub use gpui_apple::input_latency;
+
+pub mod metal_renderer {
+    pub use gpui_apple::metal_renderer::{PathRasterizationVertex, PathSprite, SurfaceBounds};
+
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+    pub use gpui_apple::metal_renderer::MetalHeadlessRenderer;
+}
 
 #[cfg(feature = "font-kit")]
 mod open_type;
