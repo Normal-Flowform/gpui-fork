@@ -950,13 +950,12 @@ vertex SurfaceVertexOutput surface_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
-                                 constant SurfaceBounds *surfaces [[buffer(SurfaceInputIndex_Surfaces)]],
-                                 texture2d<float> y_texture
-                                 [[texture(SurfaceInputIndex_YTexture)]],
-                                 texture2d<float> cb_cr_texture
-                                 [[texture(SurfaceInputIndex_CbCrTexture)]]) {
-  float mask_alpha = content_mask_alpha(input.position.xy, surfaces[input.surface_id].content_mask);
+// Shared by every surface fragment function: unpacks the bounds/corner radii
+// carried in `SurfaceFragmentInput` and returns the quad signed-distance
+// field used both to discard fully-clipped fragments and to antialias the
+// rounded-rect edge.
+static float surface_quad_sdf(SurfaceFragmentInput input,
+                              thread bool &should_discard) {
   Bounds_ScaledPixels bounds;
   bounds.origin.x = input.bounds_packed.x;
   bounds.origin.y = input.bounds_packed.y;
@@ -968,7 +967,20 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   corner_radii.bottom_right = input.corner_radii_packed.z;
   corner_radii.bottom_left = input.corner_radii_packed.w;
   float sdf = quad_sdf(input.fragment_position, bounds, corner_radii);
-  if (sdf > 0.5) {
+  should_discard = sdf > 0.5;
+  return sdf;
+}
+
+fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
+                                 constant SurfaceBounds *surfaces [[buffer(SurfaceInputIndex_Surfaces)]],
+                                 texture2d<float> y_texture
+                                 [[texture(SurfaceInputIndex_YTexture)]],
+                                 texture2d<float> cb_cr_texture
+                                 [[texture(SurfaceInputIndex_CbCrTexture)]]) {
+  float mask_alpha = content_mask_alpha(input.position.xy, surfaces[input.surface_id].content_mask);
+  bool should_discard = false;
+  float sdf = surface_quad_sdf(input, should_discard);
+  if (should_discard) {
     discard_fragment();
   }
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
@@ -982,6 +994,36 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
 
   float4 rgba = ycbcrToRGBTransform * ycbcr;
+  rgba.a *= saturate(0.5 - sdf);
+  return rgba * float4(1., 1., 1., mask_alpha);
+}
+
+// Renders a surface backed by a single-plane BGRA CVPixelBuffer (e.g. a
+// CEF/Chromium accelerated-OSR IOSurface). Its content is sRGB,
+// premultiplied-alpha BGRA, matching how gpui treats every other
+// `BGRA8Unorm` texture (the sprite atlas, decoded images): sampled without
+// gamma conversion, and composited with the same non-premultiplied blend
+// state `quads`/`polychrome_sprites`/the YCbCr surface pipeline use (source
+// factor `sourceAlpha`, i.e. straight alpha expected in the shader output).
+// So the premultiplied sample is unpremultiplied here before the shared
+// antialiasing scaling is applied, keeping a BGRA surface visually identical
+// to the same pixels drawn as an image.
+fragment float4 surface_bgra_fragment(SurfaceFragmentInput input [[stage_in]],
+                                      constant SurfaceBounds *surfaces [[buffer(SurfaceInputIndex_Surfaces)]],
+                                      texture2d<float> bgra_texture
+                                      [[texture(SurfaceInputIndex_YTexture)]]) {
+  float mask_alpha = content_mask_alpha(input.position.xy, surfaces[input.surface_id].content_mask);
+  bool should_discard = false;
+  float sdf = surface_quad_sdf(input, should_discard);
+  if (should_discard) {
+    discard_fragment();
+  }
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  float4 sample = bgra_texture.sample(texture_sampler, input.texture_position);
+
+  float alpha = sample.a;
+  float3 straight_rgb = alpha > 0.0001 ? sample.rgb / alpha : sample.rgb;
+  float4 rgba = float4(straight_rgb, alpha);
   rgba.a *= saturate(0.5 - sdf);
   return rgba * float4(1., 1., 1., mask_alpha);
 }

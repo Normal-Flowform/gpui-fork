@@ -16,8 +16,9 @@ use objc2::runtime::AnyObject;
 
 use core_foundation::base::TCFType;
 use core_video::{
-    metal_texture::CVMetalTextureGetTexture, metal_texture_cache::CVMetalTextureCache,
-    pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    metal_texture::CVMetalTextureGetTexture,
+    metal_texture_cache::CVMetalTextureCache,
+    pixel_buffer::{kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange},
 };
 use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
@@ -26,7 +27,18 @@ use metal::{
 use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
 
-use std::{cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
+use std::{
+    cell::Cell,
+    ffi::c_void,
+    mem,
+    mem::MaybeUninit,
+    ops::Range,
+    ptr, slice,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -41,6 +53,9 @@ const PATH_SAMPLE_COUNT: u32 = 4;
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+
+/// Warn only once if a surface cannot be sampled by either surface pipeline.
+static UNSUPPORTED_SURFACE_FORMAT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
 pub type Renderer = MetalRenderer;
@@ -127,6 +142,8 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    /// Single-plane BGRA CVPixelBuffers use a different fragment shader from 420f.
+    surfaces_bgra_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -325,6 +342,14 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let surfaces_bgra_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "surfaces_bgra",
+            "surface_vertex",
+            "surface_bgra_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
@@ -347,6 +372,7 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            surfaces_bgra_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -1154,7 +1180,6 @@ impl MetalRenderer {
             return;
         }
 
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
         command_encoder.set_vertex_buffer(
             SurfaceInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1176,54 +1201,96 @@ impl MetalRenderer {
             &viewport_size as *const Size<DevicePixels> as *const _,
         );
 
+        // Each surface retains its index in the shared instance buffer. Only the
+        // pipeline changes at format-run boundaries; drawing remains in scene order.
+        let mut active_format = None;
         for (index, surface) in surfaces.iter().enumerate() {
+            let pixel_format = surface.image_buffer.get_pixel_format();
+            let pipeline = if pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+                &self.surfaces_pipeline_state
+            } else if pixel_format == kCVPixelFormatType_32BGRA {
+                &self.surfaces_bgra_pipeline_state
+            } else {
+                if !UNSUPPORTED_SURFACE_FORMAT_LOGGED.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "gpui: skipping surface with unsupported CVPixelBuffer format {:?}; \
+                         only 420f (kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) and BGRA \
+                         (kCVPixelFormatType_32BGRA) are supported",
+                        pixel_format
+                    );
+                }
+                continue;
+            };
+
+            if active_format != Some(pixel_format) {
+                command_encoder.set_render_pipeline_state(pipeline);
+                active_format = Some(pixel_format);
+            }
+
             let texture_size = size(
                 DevicePixels::from(surface.image_buffer.get_width() as i32),
                 DevicePixels::from(surface.image_buffer.get_height() as i32),
             );
-
-            assert_eq!(
-                surface.image_buffer.get_pixel_format(),
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            );
-
-            let y_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::R8Unorm,
-                    surface.image_buffer.get_width_of_plane(0),
-                    surface.image_buffer.get_height_of_plane(0),
-                    0,
-                )
-                .unwrap();
-            let cb_cr_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::RG8Unorm,
-                    surface.image_buffer.get_width_of_plane(1),
-                    surface.image_buffer.get_height_of_plane(1),
-                    1,
-                )
-                .unwrap();
-
             command_encoder.set_vertex_bytes(
                 SurfaceInputIndex::TextureSize as u64,
                 mem::size_of_val(&texture_size) as u64,
                 &texture_size as *const Size<DevicePixels> as *const _,
             );
-            // let y_texture = y_texture.get_texture().unwrap().
-            command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
-            command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
+
+            if pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+                let y_texture = self
+                    .core_video_texture_cache
+                    .create_texture_from_image(
+                        surface.image_buffer.as_concrete_TypeRef(),
+                        None,
+                        MTLPixelFormat::R8Unorm,
+                        surface.image_buffer.get_width_of_plane(0),
+                        surface.image_buffer.get_height_of_plane(0),
+                        0,
+                    )
+                    .unwrap();
+                let cb_cr_texture = self
+                    .core_video_texture_cache
+                    .create_texture_from_image(
+                        surface.image_buffer.as_concrete_TypeRef(),
+                        None,
+                        MTLPixelFormat::RG8Unorm,
+                        surface.image_buffer.get_width_of_plane(1),
+                        surface.image_buffer.get_height_of_plane(1),
+                        1,
+                    )
+                    .unwrap();
+
+                command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
+                    let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
+                    Some(metal::TextureRef::from_ptr(texture as *mut _))
+                });
+                command_encoder.set_fragment_texture(
+                    SurfaceInputIndex::CbCrTexture as u64,
+                    unsafe {
+                        let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
+                        Some(metal::TextureRef::from_ptr(texture as *mut _))
+                    },
+                );
+            } else {
+                let bgra_texture = self
+                    .core_video_texture_cache
+                    .create_texture_from_image(
+                        surface.image_buffer.as_concrete_TypeRef(),
+                        None,
+                        MTLPixelFormat::BGRA8Unorm,
+                        surface.image_buffer.get_width(),
+                        surface.image_buffer.get_height(),
+                        0,
+                    )
+                    .unwrap();
+
+                // BGRA uses a single texture at the same index as the 420f luma plane.
+                command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
+                    let texture = CVMetalTextureGetTexture(bgra_texture.as_concrete_TypeRef());
+                    Some(metal::TextureRef::from_ptr(texture as *mut _))
+                });
+            }
 
             command_encoder.draw_primitives_instanced_base_instance(
                 metal::MTLPrimitiveType::Triangle,
@@ -1603,6 +1670,7 @@ enum SurfaceInputIndex {
     Surfaces = 1,
     ViewportSize = 2,
     TextureSize = 3,
+    /// The 420f luma plane or the single BGRA texture.
     YTexture = 4,
     CbCrTexture = 5,
 }
@@ -1659,5 +1727,216 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_foundation::{
+        base::{CFType, TCFType},
+        dictionary::CFDictionary,
+        string::CFString,
+    };
+    use core_video::pixel_buffer::{
+        CVPixelBuffer, CVPixelBufferGetBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
+    };
+    use gpui::{Corners, PaintSurface, PlatformHeadlessRenderer, Scene, point};
+
+    fn iosurface_attributes() -> CFDictionary<CFString, CFType> {
+        let io_surface_key =
+            unsafe { CFString::wrap_under_get_rule(kCVPixelBufferIOSurfacePropertiesKey) };
+        let io_surface_props: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[]);
+        CFDictionary::from_CFType_pairs(&[(io_surface_key, io_surface_props.into_CFType())])
+    }
+
+    /// Creates a small, IOSurface-backed BGRA `CVPixelBuffer` (IOSurface
+    /// backing is required for `CVMetalTextureCache` to vend a texture from
+    /// it) and fills every pixel with `bgra`, a premultiplied-alpha byte
+    /// quadruple in `[B, G, R, A]` order, matching how a real BGRA surface
+    /// (e.g. CEF's shared IOSurface) is laid out.
+    fn make_bgra_pixel_buffer(width: usize, height: usize, bgra: [u8; 4]) -> CVPixelBuffer {
+        let pixel_buffer = CVPixelBuffer::new(
+            kCVPixelFormatType_32BGRA,
+            width,
+            height,
+            Some(&iosurface_attributes()),
+        )
+        .expect("failed to create BGRA CVPixelBuffer");
+
+        pixel_buffer.lock_base_address(0);
+        // SAFETY: the buffer was just locked above and is unlocked before
+        // this function returns; `get_bytes_per_row` reports the base
+        // address's real stride, and we only write within `width` * 4 bytes
+        // of each of the `height` rows it describes.
+        unsafe {
+            let base = CVPixelBufferGetBaseAddress(pixel_buffer.as_concrete_TypeRef()) as *mut u8;
+            let bytes_per_row = pixel_buffer.get_bytes_per_row();
+            for y in 0..height {
+                let row = base.add(y * bytes_per_row);
+                for x in 0..width {
+                    let pixel = row.add(x * 4);
+                    ptr::copy_nonoverlapping(bgra.as_ptr(), pixel, 4);
+                }
+            }
+        }
+        pixel_buffer.unlock_base_address(0);
+
+        pixel_buffer
+    }
+
+    fn make_420f_pixel_buffer(width: usize, height: usize) -> CVPixelBuffer {
+        let pixel_buffer = CVPixelBuffer::new(
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            width,
+            height,
+            Some(&iosurface_attributes()),
+        )
+        .expect("failed to create 420f CVPixelBuffer");
+
+        assert_eq!(pixel_buffer.lock_base_address(0), 0);
+        assert_eq!(pixel_buffer.get_plane_count(), 2);
+        // SAFETY: the pixel buffer is locked, both plane addresses are valid
+        // for their reported heights and strides, and the luma/chroma widths
+        // are measured in one/two bytes per pixel respectively.
+        unsafe {
+            for plane in 0..2 {
+                let base = pixel_buffer.get_base_address_of_plane(plane) as *mut u8;
+                let stride = pixel_buffer.get_bytes_per_row_of_plane(plane);
+                let row_bytes = pixel_buffer.get_width_of_plane(plane) * (plane + 1);
+                for row in 0..pixel_buffer.get_height_of_plane(plane) {
+                    ptr::write_bytes(base.add(row * stride), 128, row_bytes);
+                }
+            }
+        }
+        pixel_buffer.unlock_base_address(0);
+        pixel_buffer
+    }
+
+    fn scaled_bounds(width: f32, height: f32) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: size(ScaledPixels(width), ScaledPixels(height)),
+        }
+    }
+
+    /// Renders a solid, 50%-alpha, premultiplied BGRA surface and confirms
+    /// the sampled color came out unpremultiplied before compositing: with
+    /// this renderer's straight-alpha blend state (`sourceAlpha` /
+    /// `oneMinusSourceAlpha`), feeding the premultiplied sample through
+    /// unmodified would darken the result by another factor of `alpha`
+    /// (~64 instead of ~128 for the red channel below), the classic
+    /// double-premultiply bug for straight-alpha-blended premultiplied
+    /// sources.
+    #[test]
+    fn draw_surfaces_unpremultiplies_bgra_surfaces() {
+        let width = 4usize;
+        let height = 4usize;
+        // BGRA, premultiplied: 50% red, 50% coverage.
+        let premultiplied_bgra = [0u8, 0u8, 128u8, 128u8];
+        let pixel_buffer = make_bgra_pixel_buffer(width, height, premultiplied_bgra);
+
+        let bounds = scaled_bounds(width as f32, height as f32);
+        let mut scene = Scene::default();
+        scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask: ContentMask::new(bounds),
+            corner_radii: Corners::default(),
+            crop: [0., 0., 1., 1.],
+            image_buffer: pixel_buffer,
+        });
+        scene.finish();
+
+        let mut renderer = MetalHeadlessRenderer::new();
+        let image = renderer
+            .render_scene_to_image(
+                &scene,
+                size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            )
+            .expect("headless surface render failed");
+
+        let pixel = image.get_pixel(width as u32 / 2, height as u32 / 2);
+        let [r, g, b, _a] = pixel.0;
+        assert!(
+            (120..=136).contains(&r),
+            "expected the unpremultiplied red channel to round-trip back to \
+             ~128 through the straight-alpha blend, got {r} (pixel: {pixel:?})"
+        );
+        assert_eq!(g, 0, "unexpected green in pixel {pixel:?}");
+        assert_eq!(b, 0, "unexpected blue in pixel {pixel:?}");
+    }
+
+    /// Mixed formats share the same instance buffer. A BGRA/420f/BGRA run
+    /// must keep each surface's geometry and draw order when switching pipelines.
+    #[test]
+    fn draw_surfaces_preserves_order_across_mixed_formats() {
+        let height = 4;
+        let red = make_bgra_pixel_buffer(12, height, [0, 0, 255, 255]);
+        let gray = make_420f_pixel_buffer(8, height);
+        let blue = make_bgra_pixel_buffer(4, height, [255, 0, 0, 255]);
+
+        let mut scene = Scene::default();
+        for (index, buffer) in [red, gray, blue].into_iter().enumerate() {
+            let mut bounds = scaled_bounds(buffer.get_width() as f32, height as f32);
+            bounds.origin.x = ScaledPixels((index * 4) as f32);
+            scene.insert_primitive(PaintSurface {
+                order: 0,
+                bounds,
+                content_mask: ContentMask::new(bounds),
+                corner_radii: Corners::default(),
+                crop: [0., 0., 1., 1.],
+                image_buffer: buffer,
+            });
+        }
+        scene.finish();
+
+        let mut renderer = MetalHeadlessRenderer::new();
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(12), DevicePixels(height as i32)))
+            .expect("headless render of mixed surface formats failed");
+        assert_eq!(image.get_pixel(2, 2).0[..3], [255, 0, 0]);
+        let gray_pixel = image.get_pixel(6, 2).0;
+        assert!(
+            gray_pixel[..3]
+                .iter()
+                .all(|channel| (110..=145).contains(channel)),
+            "expected neutral 420f gray between the BGRA surfaces, got {gray_pixel:?}"
+        );
+        assert_eq!(image.get_pixel(10, 2).0[..3], [0, 0, 255]);
+    }
+
+    /// A surface backed by an unsupported `CVPixelBuffer` format must be
+    /// skipped (with a one-time warning) rather than panicking the renderer.
+    #[test]
+    fn draw_surfaces_skips_unsupported_format_without_panicking() {
+        let width = 4usize;
+        let height = 4usize;
+        // `kCVPixelFormatType_24RGB`: neither of the two formats gpui knows
+        // how to sample for a surface.
+        let unsupported_format = core_video::pixel_buffer::kCVPixelFormatType_24RGB;
+        let pixel_buffer = CVPixelBuffer::new(unsupported_format, width, height, None)
+            .expect("failed to create RGB CVPixelBuffer");
+
+        let bounds = scaled_bounds(width as f32, height as f32);
+        let mut scene = Scene::default();
+        scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask: ContentMask::new(bounds),
+            corner_radii: Corners::default(),
+            crop: [0., 0., 1., 1.],
+            image_buffer: pixel_buffer,
+        });
+        scene.finish();
+
+        let mut renderer = MetalHeadlessRenderer::new();
+        // Must not panic; the surface is simply skipped.
+        renderer
+            .render_scene_to_image(
+                &scene,
+                size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            )
+            .expect("headless render with an unsupported surface format should not error");
     }
 }

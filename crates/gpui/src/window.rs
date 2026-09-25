@@ -5063,6 +5063,21 @@ impl Window {
 
     /// Paint a surface into the scene for the next frame at the current z-index.
     ///
+    /// `image_buffer` must be one of the `CVPixelBuffer` formats the platform
+    /// renderer knows how to sample:
+    /// - `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange` (`420f`), for video.
+    /// - `kCVPixelFormatType_32BGRA` (`BGRA`), sRGB content with
+    ///   premultiplied alpha (e.g. a CEF/Chromium accelerated-OSR IOSurface),
+    ///   rendered identically to the same pixels drawn as an image.
+    ///
+    /// The buffer must be IOSurface-backed so CoreVideo can vend Metal textures.
+    /// Any other format is currently unsupported: the surface is skipped and
+    /// a warning is logged once, rather than panicking.
+    ///
+    /// The caller must keep `image_buffer` (and the IOSurface backing it)
+    /// alive until this frame has been presented; gpui does not extend its
+    /// lifetime beyond the paint call.
+    ///
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(target_os = "macos")]
     pub fn paint_surface(
