@@ -646,6 +646,7 @@ impl Style {
                 y: Overflow::Visible,
             } => None,
             _ => {
+                let rounded_bounds = bounds;
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
 
@@ -679,7 +680,15 @@ impl Style {
                     (false, false) => Bounds::from_corners(min, max),
                 };
 
-                Some(ContentMask { bounds })
+                // Rounding applies only when both axes clip. Preserve the outer
+                // curve independently of the border-inset rectangular clip.
+                let mut mask = ContentMask::new(bounds);
+                if self.overflow.x != Overflow::Visible && self.overflow.y != Overflow::Visible {
+                    mask =
+                        ContentMask::rounded(rounded_bounds, self.corner_radii.to_pixels(rem_size));
+                    mask.bounds = bounds;
+                }
+                Some(mask)
             }
         }
     }

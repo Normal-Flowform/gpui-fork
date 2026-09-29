@@ -763,6 +763,8 @@ pub struct PolychromeSprite {
     /// sprite to sample, in DISPLAYED (post-uv_transform) orientation.
     /// `[0, 0, 1, 1]` = the whole sprite.
     pub crop: [f32; 4],
+    /// Explicit tail padding matches WGSL's 8-byte storage-array alignment.
+    pub pad2: u32,
 }
 
 impl From<PolychromeSprite> for Primitive {

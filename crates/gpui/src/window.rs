@@ -2119,28 +2119,146 @@ pub struct DispatchEventResult {
     pub default_prevented: bool,
 }
 
-/// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future.
+/// The visible rectangle, optionally intersected with a rounded rectangle.
+/// Keep the rounded bounds separate: intersecting a child rectangle must not move
+/// the parent's corner centers or turn its arc into a smaller rounded rectangle.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
-    /// The bounds
+    /// Rectangular clipping and scene-culling bounds.
     pub bounds: Bounds<P>,
+    /// Original bounds of the rounded constraint; ignored when all radii are zero.
+    pub rounded_bounds: Bounds<P>,
+    /// Optional rounding, encoded as zero radii for a rectangular mask so the
+    /// representation can be shared directly with GPU instance buffers.
+    pub corner_radii: Corners<P>,
+}
+
+impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
+    /// A rectangular content mask.
+    pub fn new(bounds: Bounds<P>) -> Self {
+        Self {
+            bounds,
+            ..Default::default()
+        }
+    }
 }
 
 impl ContentMask<Pixels> {
-    /// Scale the content mask's pixel units by the given scaling factor.
-    pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
-        ContentMask {
-            bounds: self.bounds.scale(factor),
+    /// A rounded mask with nonnegative radii clamped to half its shortest side.
+    pub fn rounded(bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>) -> Self {
+        if bounds.is_empty() {
+            return Self::new(bounds);
+        }
+        let corner_radii = corner_radii
+            .map(|radius| {
+                if radius.0.is_finite() {
+                    (*radius).max(Pixels::ZERO)
+                } else {
+                    Pixels::ZERO
+                }
+            })
+            .clamp_radii_for_quad_size(bounds.size);
+        Self {
+            bounds,
+            rounded_bounds: bounds,
+            corner_radii,
         }
     }
 
-    /// Intersect the content mask with the given content mask.
-    pub fn intersect(&self, other: &Self) -> Self {
-        let bounds = self.bounds.intersect(&other.bounds);
-        ContentMask { bounds }
+    /// Scale both constraints without moving their corner centers.
+    pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
+        ContentMask {
+            bounds: self.bounds.scale(factor),
+            rounded_bounds: self.rounded_bounds.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
+        }
+    }
+
+    /// Intersect a child mask with its parent. Rectangle/rounded intersections,
+    /// coincident rounded bounds, and fully contained rounded masks are exact.
+    /// Two crossing rounded rectangles cannot in general be represented by one
+    /// rounded constraint. In that case retain the parent's arc and conservatively
+    /// intersect with an inscribed rectangle of the child (never leak outside
+    /// either mask). This can over-clip crossing rounded children.
+    pub fn intersect(&self, parent: &Self) -> Self {
+        let bounds = self.bounds.intersect(&parent.bounds);
+        if bounds.is_empty() {
+            return Self::new(bounds);
+        }
+        if self.corner_radii.is_zero() {
+            return Self { bounds, ..*parent };
+        }
+        if parent.corner_radii.is_zero() {
+            return Self { bounds, ..*self };
+        }
+        if self.rounded_bounds == parent.rounded_bounds {
+            return Self {
+                bounds,
+                corner_radii: Corners {
+                    top_left: self.corner_radii.top_left.max(parent.corner_radii.top_left),
+                    top_right: self
+                        .corner_radii
+                        .top_right
+                        .max(parent.corner_radii.top_right),
+                    bottom_right: self
+                        .corner_radii
+                        .bottom_right
+                        .max(parent.corner_radii.bottom_right),
+                    bottom_left: self
+                        .corner_radii
+                        .bottom_left
+                        .max(parent.corner_radii.bottom_left),
+                },
+                ..*self
+            };
+        }
+        if parent.contains_rounded_rect(bounds) {
+            return Self { bounds, ..*self };
+        }
+        if self.contains_rounded_rect(bounds) {
+            return Self { bounds, ..*parent };
+        }
+        // The diagonal inset puts each new corner on or inside its old circle.
+        let inset = self.corner_radii.max() * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+        Self {
+            bounds: bounds.intersect(&self.rounded_bounds.inset(inset)),
+            ..*parent
+        }
+    }
+
+    fn contains_rounded_rect(&self, bounds: Bounds<Pixels>) -> bool {
+        [
+            bounds.origin,
+            bounds.top_right(),
+            bounds.bottom_right(),
+            bounds.bottom_left(),
+        ]
+        .into_iter()
+        .all(|point| self.rounded_contains(point))
+    }
+
+    /// Whether a point lies inside both the rectangular and rounded constraints.
+    pub fn contains(&self, point: Point<Pixels>) -> bool {
+        self.bounds.contains(&point) && self.rounded_contains(point)
+    }
+
+    fn rounded_contains(&self, point: Point<Pixels>) -> bool {
+        if self.corner_radii.is_zero() {
+            return true;
+        }
+        let center = self.rounded_bounds.center();
+        let radius = match (point.x < center.x, point.y < center.y) {
+            (true, true) => self.corner_radii.top_left,
+            (false, true) => self.corner_radii.top_right,
+            (false, false) => self.corner_radii.bottom_right,
+            (true, false) => self.corner_radii.bottom_left,
+        };
+        let delta_x = ((point.x - center.x).abs() - self.rounded_bounds.size.width / 2. + radius)
+            .max(Pixels::ZERO);
+        let delta_y = ((point.y - center.y).abs() - self.rounded_bounds.size.height / 2. + radius)
+            .max(Pixels::ZERO);
+        delta_x.0 * delta_x.0 + delta_y.0 * delta_y.0 <= radius.0 * radius.0
     }
 }
 
@@ -3088,6 +3206,7 @@ impl Window {
                         point(start, bounds.top()),
                         point(end, bounds.bottom()),
                     ),
+                    ..underline.content_mask
                 },
                 ..underline
             });
@@ -3161,6 +3280,7 @@ impl Window {
     fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.cover_bounds(self.content_mask().bounds),
+            ..self.content_mask().scale(self.scale_factor())
         }
     }
 
@@ -4136,6 +4256,7 @@ impl Window {
                     origin: Point::default(),
                     size: self.viewport_size,
                 },
+                ..Default::default()
             })
     }
 
@@ -4560,6 +4681,7 @@ impl Window {
                 self.next_frame.scene.insert_primitive(Quad {
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
+                        ..quad.content_mask
                     },
                     ..quad
                 });
@@ -4782,6 +4904,7 @@ impl Window {
             let opacity = self.element_opacity();
 
             self.next_frame.scene.insert_primitive(PolychromeSprite {
+                pad2: 0,
                 order: 0,
                 pad: 0,
                 grayscale: false.into(),
@@ -4923,6 +5046,7 @@ impl Window {
         let opacity = self.element_opacity();
 
         self.next_frame.scene.insert_primitive(PolychromeSprite {
+            pad2: 0,
             order: 0,
             pad: 0,
             grayscale: grayscale.into(),
@@ -7659,6 +7783,103 @@ mod tests {
         canvas, div, hsla, point, px, size,
     };
 
+    #[test]
+    fn rounded_content_mask_preserves_parent_arc_through_rectangles() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(80.)));
+        let parent = ContentMask::rounded(bounds, px(24.).into());
+        let child_bounds = Bounds::new(point(px(15.), px(22.)), size(px(90.), px(70.)));
+        let child = ContentMask::new(child_bounds);
+        let intersection = child.intersect(&parent);
+        assert_eq!(intersection.bounds, child_bounds);
+        assert_eq!(intersection.rounded_bounds, bounds);
+        assert_eq!(intersection.corner_radii, parent.corner_radii);
+        assert_eq!(parent.intersect(&child), intersection);
+        assert!(!intersection.contains(point(px(16.), px(23.))));
+        assert!(intersection.contains(point(px(35.), px(23.))));
+        let nested = ContentMask::new(bounds).intersect(&intersection);
+        assert_eq!(nested, intersection);
+        let scaled = nested.scale(1.5);
+        assert_eq!(scaled.rounded_bounds, bounds.scale(1.5));
+        assert_eq!(scaled.corner_radii, parent.corner_radii.scale(1.5));
+    }
+
+    #[test]
+    fn rounded_content_mask_containment_and_coincident_intersections_are_exact() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
+        let outer = ContentMask::rounded(bounds, px(20.).into());
+        let inner = ContentMask::rounded(bounds.inset(px(25.)), px(10.).into());
+        assert_eq!(inner.intersect(&outer), inner);
+        assert_eq!(outer.intersect(&inner), inner);
+        let larger_radius = ContentMask::rounded(bounds, px(30.).into());
+        assert_eq!(outer.intersect(&larger_radius), larger_radius);
+        assert_eq!(larger_radius.intersect(&outer), larger_radius);
+    }
+
+    #[test]
+    fn crossing_rounded_content_masks_never_leak() {
+        let parent = ContentMask::rounded(
+            Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.))),
+            px(30.).into(),
+        );
+        let child = ContentMask::rounded(
+            Bounds::new(point(px(55.), px(-8.)), size(px(60.), px(90.))),
+            px(20.).into(),
+        );
+        let intersection = child.intersect(&parent);
+        assert_eq!(intersection.rounded_bounds, parent.rounded_bounds);
+        assert!(intersection.contains(point(px(80.), px(40.))));
+        for y in -10..110 {
+            for x in -10..120 {
+                let point = point(px(x as f32 + 0.5), px(y as f32 + 0.5));
+                if intersection.contains(point) {
+                    assert!(parent.contains(point) && child.contains(point), "{point:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_content_mask_handles_empty_and_invalid_radii() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(40.)));
+        let mask = ContentMask::rounded(
+            bounds,
+            crate::Corners {
+                top_left: px(-3.),
+                top_right: px(200.),
+                bottom_right: px(f32::NAN),
+                bottom_left: px(f32::INFINITY),
+            },
+        );
+        assert_eq!(mask.corner_radii.top_left, px(0.));
+        assert_eq!(mask.corner_radii.top_right, px(20.));
+        assert_eq!(mask.corner_radii.bottom_right, px(0.));
+        assert_eq!(mask.corner_radii.bottom_left, px(0.));
+        let empty = ContentMask::new(Bounds::new(point(px(200.), px(0.)), bounds.size));
+        assert!(empty.intersect(&mask).bounds.is_empty());
+        assert_eq!(
+            ContentMask::rounded(Bounds::default(), px(5.).into()),
+            ContentMask::default()
+        );
+    }
+
+    #[test]
+    fn rounded_overflow_style_keeps_arc_and_border_inset_independent() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(80.)));
+        let mut style = crate::Style::default();
+        style.overflow = point(crate::Overflow::Hidden, crate::Overflow::Hidden);
+        style.corner_radii = crate::Corners::all(px(20.)).map(|radius| (*radius).into());
+        style.border_color = Some(crate::rgb(0x111111).into());
+        style.border_widths = crate::Edges::all(px(3.).into());
+        let mask = style.overflow_mask(bounds, px(16.)).unwrap();
+        assert_eq!(mask.rounded_bounds, bounds);
+        assert_eq!(mask.bounds, bounds.inset(px(3.)));
+        assert_eq!(mask.corner_radii.top_left, px(20.));
+        style.overflow.x = crate::Overflow::Visible;
+        assert_eq!(
+            style.overflow_mask(bounds, px(16.)).unwrap().corner_radii,
+            crate::Corners::default()
+        );
+    }
     /// Visibility transitions reach observers exactly once each, with the new
     /// state already stored on the window, and never wake the platform for a
     /// frame: the platform requests one itself when it resumes presenting.
@@ -8898,6 +9119,7 @@ mod tests {
             let original_opacity = window.element_opacity();
             let mask = ContentMask {
                 bounds: Bounds::from_corners(point(px(4.), px(10.)), point(px(16.), px(12.))),
+                ..Default::default()
             };
             let style = UnderlineStyle {
                 thickness: px(2.),
@@ -9046,6 +9268,7 @@ mod tests {
                             point(px(-1000.), px(-1000.)),
                             point(px(1000.), px(1000.)),
                         ),
+                        ..Default::default()
                     });
                     paint(window);
                     window.content_mask_stack.pop();

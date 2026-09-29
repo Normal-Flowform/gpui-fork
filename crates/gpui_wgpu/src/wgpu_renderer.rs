@@ -84,6 +84,8 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+    rounded_mask_bounds: PodBounds,
+    mask_corner_radii: [f32; 4],
 }
 
 #[repr(C)]
@@ -2642,7 +2644,10 @@ mod tests {
             order: 0,
             border_style: BorderStyle::Solid,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
             background: color.into(),
             border_color: color,
             corner_radii: Corners::default(),
@@ -2795,16 +2800,44 @@ mod tests {
     }
 
     #[test]
+    fn native_shader_record_sizes_match_rust() {
+        let module =
+            naga::front::wgsl::parse_str(STORAGE_BUFFER_SHADERS).expect("shader should parse");
+        for (name, size) in [
+            (
+                "ContentMask",
+                std::mem::size_of::<ContentMask<ScaledPixels>>(),
+            ),
+            ("Quad", std::mem::size_of::<Quad>()),
+            ("Shadow", std::mem::size_of::<Shadow>()),
+            ("Underline", std::mem::size_of::<Underline>()),
+            ("MonochromeSprite", std::mem::size_of::<MonochromeSprite>()),
+            ("PolychromeSprite", std::mem::size_of::<PolychromeSprite>()),
+        ] {
+            let shader_type = module
+                .types
+                .iter()
+                .find(|(_, ty)| ty.name.as_deref() == Some(name))
+                .unwrap()
+                .1;
+            let naga::TypeInner::Struct { span, .. } = shader_type.inner else {
+                panic!("expected struct {name}")
+            };
+            assert_eq!(span as usize, size, "{name} array stride must match Rust");
+        }
+    }
+
+    #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
-        assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
-        assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 48 * 4);
+        assert_eq!(std::mem::size_of::<Shadow>(), 36 * 4);
         assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
-        assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
-        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
-        // Flowform: 24 upstream words + uv_transform + crop[4].
-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 29 * 4);
+        assert_eq!(std::mem::size_of::<Underline>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 36 * 4);
+        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 36 * 4);
+        // Includes rounded content mask, UV transform/crop and explicit tail padding.
+        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 38 * 4);
     }
 
     #[test]
@@ -2833,6 +2866,7 @@ mod tests {
                         height: 8.0.into(),
                     },
                 },
+                ..Default::default()
             },
             background: linear_gradient(
                 11.0,
@@ -2891,6 +2925,14 @@ mod tests {
                 6.0_f32.to_bits(),
                 7.0_f32.to_bits(),
                 8.0_f32.to_bits(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 1,
                 1,
                 0,

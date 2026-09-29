@@ -38,6 +38,8 @@ September merge relocated the shared Metal renderer into `gpui_apple`.
 
 | API / behavior | Fork files | Client call sites | Backends |
 | --- | --- | --- | --- |
+| `ContentMask::new(bounds)` and `ContentMask::rounded(bounds, corner_radii)`; `rounded_bounds`/`corner_radii` retain the original arc independently of the intersected rectangular `bounds`. `Style::overflow_mask` uses the element's radii when both axes hide overflow. | `crates/gpui/src/window.rs`, `crates/gpui/src/style.rs`; shader files below | `app/board_view/canvas.rs`, `views/dot_grid.rs` | Metal: antialiased clips on quads, shadows, underlines, paths, monochrome/polychrome sprites and surfaces. HLSL/WGSL: rounded fragment discard on quads, shadows, underlines and all sprites; paths remain rectangular. |
+| `PolychromeSprite::pad2` explicitly aligns the record's tail for WGSL storage arrays. With the rounded mask the record is 152 bytes (38 words), identical across Rust, Metal, native WGSL, WebGL and HLSL. | `crates/gpui/src/scene.rs`, shader files and `crates/gpui_wgpu/src/wgpu_renderer.rs` layout tests | Indirect via image elements | All backends share the same record layout. |
 | `gpui::pattern_dots(color, spacing, radius)` returns a `Background` with `BackgroundTag::Dots = 4`; the style fallback uses its solid color. Spacing and radius are screen-space/device-pixel values. | `crates/gpui/src/color.rs`, `crates/gpui/src/style.rs`, `crates/gpui_apple/src/shaders.metal` (`prepare_fill_color`, `fill_color`) | `views/dot_grid.rs` | Metal dot-grid shader only; WGSL/HLSL have no dots case. |
 | `gpui::ImageTransform { rotation_quarters, flip_h, flip_v }`, `encode()` and `swaps_axes()`; rotation is quarter turns and the packed UV bits are 0–3. | `crates/gpui/src/elements/img.rs`, `crates/gpui/src/scene.rs`; shader files below | `app/primitive/canvas.rs`, `app/crop.rs` | Image sprites: Metal, WGSL, HLSL. |
 | `Img::transform(ImageTransform)` and `Img::crop(Bounds<f32>)`; crop is normalized in displayed (post-transform) orientation. Layout swaps intrinsic axes for 90°/270° rotation; object-fit uses rotated and cropped dimensions. Out-of-bounds crops are clamped; zero-area/identity crops are ignored by `sanitize_crop`. | `crates/gpui/src/elements/img.rs`, `crates/gpui/src/window.rs` | Transform: `app/primitive/canvas.rs`, `app/crop.rs`; crop: `app/primitive/canvas.rs`, `app/grid_view/media.rs` | Image sprites: Metal, WGSL, HLSL. |
@@ -47,7 +49,7 @@ September merge relocated the shared Metal renderer into `gpui_apple`.
 | `scene::PolychromeSprite` has `uv_transform: u32` and `crop: [f32; 4]`; `scene::PaintSurface` has `corner_radii` and `crop`. The image crop defaults to `[0, 0, 1, 1]`. | `crates/gpui/src/scene.rs` | Indirect via image/video elements above; no direct scene construction. | Image scene data consumed by Metal/WGSL/HLSL; surface data by Metal. |
 | `gpui_macos::input_latency::{LatencyCounter, INPUT_QUEUE_AGE, GPU_PRESENT}`; `drain()` returns and resets `(sum, max, count)`. Queue age samples pressed-button mouse moves and scrolls; GPU present measures Metal draw entry (including `next_drawable`) through command-buffer completion. | `crates/gpui_apple/src/input_latency.rs`, `crates/gpui_apple/src/gpui_apple.rs`, `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_macos/src/gpui_macos.rs`, `crates/gpui_macos/src/window.rs` | `services/metrics.rs` | macOS event loop and shared Apple Metal renderer; exported through `gpui_macos`. |
 | Metal `SurfaceBounds { corner_radii, crop }` (no `Eq`) and surface vertex/fragment crop, rounded SDF; polychrome vertex crops then inversely remaps transformed UVs. | `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_apple/src/shaders.metal` | Indirect through `app/grid_view/media.rs` and `app/primitive/canvas.rs` | macOS/Metal. |
-| WGSL and HLSL `PolychromeSprite` add `uv_transform` and crop; vertex shaders crop before applying inverse rotation/flip. WebGL's fixed decoder uses a 29-word sprite stride, matching Rust's 116-byte record. | `crates/gpui_wgpu/src/shaders.wgsl`, `crates/gpui_wgpu/src/shaders_webgl.wgsl`, `crates/gpui_wgpu/src/wgpu_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl` | Indirect through image callers above. | wgpu/WebGL and Windows/HLSL image paths; see WGSL gap below. |
+| WGSL and HLSL `PolychromeSprite` add `uv_transform` and crop; vertex shaders crop before applying inverse rotation/flip. WebGL's fixed decoder uses a 38-word sprite stride, matching Rust's 152-byte record. | `crates/gpui_wgpu/src/shaders.wgsl`, `crates/gpui_wgpu/src/shaders_webgl.wgsl`, `crates/gpui_wgpu/src/wgpu_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl` | Indirect through image callers above. | wgpu/WebGL and Windows/HLSL image paths. |
 
 The image sampling contract is worth checking independently of compilation:
 
@@ -68,16 +70,38 @@ The image sampling contract is worth checking independently of compilation:
   The client scales spacing/radius to device pixels and phases the quad with
   pan in `views/dot_grid.rs`.
 
+## Rounded content-mask contract
+
+- Zero radii mean no rounded constraint. Constructors clamp finite, nonnegative
+  radii to half the shortest side; invalid radii become zero.
+- Rectangular descendants intersect only `bounds`, preserving the parent's
+  original `rounded_bounds` and circle centers. Scaling, snapped paint masks,
+  split border strips and underline exclusions also preserve the rounded shape.
+- A rectangle intersected with a rounded rectangle is exact. Coincident rounded
+  bounds use the maximum radius at each corner; fully contained masks are exact.
+  Two genuinely crossing rounded rectangles cannot always fit this single-curve
+  representation: the intersection keeps the parent's curve and clips to a
+  centered inscribed rectangle of the child. This is conservative (no leakage),
+  but can over-clip crossing rounded children. It is not an arbitrary clip stack.
+- Scene culling and hit testing still use rectangular bounds; this change adds
+  paint clipping, not curved hit targets. `ContentMask::contains` can test both
+  constraints explicitly.
+- `ContentMask { bounds }` literals must migrate to `ContentMask::new(bounds)`
+  (or specify the new fields). GPU records gain 32 bytes for original bounds and
+  radii, rather than copying the mask through each shader varying.
+
 ## Known gaps
 
-- Native WGSL storage layout advances **120 bytes** per `PolychromeSprite`,
-  while Rust's `#[repr(C)]` struct is **116 bytes**. Linux/web wgpu sprite
-  records therefore do not have a matching stride. The WebGL fixed decoder's
-  29-word stride does not fix the native WGSL layout. Do not claim those paths
-  render transformed/cropped sprites correctly without correcting and testing
-  that layout.
+- The former native-WGSL `PolychromeSprite` 116/120-byte stride mismatch is fixed
+  with explicit tail padding; layout tests check native struct spans and WebGL
+  word strides. This does not substitute for Linux/web rendering verification.
+- Rounded **path** masking is Metal-only; HLSL/WGSL paths retain rectangular
+  clips. Metal uses antialiased mask coverage; HLSL/WGSL use a hard SDF discard.
 - `pattern_dots` has a Metal shader implementation, not a WGSL/HLSL one.
   `Surface` painting and the latency counters are macOS-specific.
+- The rounded-mask change was compiled/rendered on macOS and WGSL was validated
+  with Naga; Windows FXC compilation and Windows runtime rendering still require
+  verification on Windows.
 
 ## Updating from upstream
 
