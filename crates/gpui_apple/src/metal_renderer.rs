@@ -143,6 +143,7 @@ pub struct MetalRenderer {
 
 #[repr(C)]
 pub struct PathRasterizationVertex {
+    pub content_mask: ContentMask<ScaledPixels>,
     pub xy_position: Point<ScaledPixels>,
     pub st_position: Point<f32>,
     pub color: Background,
@@ -779,6 +780,7 @@ impl MetalRenderer {
         let mut vertices = Vec::new();
         for path in paths {
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
+                content_mask: path.content_mask,
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
@@ -1159,6 +1161,11 @@ impl MetalRenderer {
             0,
         );
         command_encoder.set_vertex_buffer(
+            SurfaceInputIndex::Surfaces as u64,
+            Some(&instance_bindings.surfaces.buffer),
+            instance_bindings.surfaces.offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
             SurfaceInputIndex::Surfaces as u64,
             Some(&instance_bindings.surfaces.buffer),
             instance_bindings.surfaces.offset as u64,
