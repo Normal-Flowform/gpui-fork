@@ -34,13 +34,22 @@ merged upstream history (oldest first):
 The current tree, rather than each pre-merge diff, is authoritative: the
 September merge relocated the shared Metal renderer into `gpui_apple`.
 
+Windows parity commit `b926dfaa7d` (2026-10-02, on `3f8e42df2d`) restores three
+Flowform-only Windows changes that the `flowform/upstream-2026-09-25` base
+dropped because they lived only on `flowform/upstream-2026-07-14`
+(`a6249944b3` dot-grid shader parity, `60f925cb30` Windows window-platform
+support): the HLSL and WGSL `pattern_dots` case, the live-cursor window-control
+hit test, and Windows `start_window_move` / `titlebar_double_click`. Without
+them Windows canvases paint solid black and the custom title bar cannot be
+dragged. Carry this commit through every upstream merge.
+
 ## Flowform-only APIs and behavior
 
 | API / behavior | Fork files | Client call sites | Backends |
 | --- | --- | --- | --- |
 | `ContentMask::new(bounds)` and `ContentMask::rounded(bounds, corner_radii)`; `rounded_bounds`/`corner_radii` retain the original arc independently of the intersected rectangular `bounds`. `Style::overflow_mask` uses the element's radii when both axes hide overflow. | `crates/gpui/src/window.rs`, `crates/gpui/src/style.rs`; shader files below | `app/board_view/canvas.rs`, `views/dot_grid.rs` | Metal: antialiased clips on quads, shadows, underlines, paths, monochrome/polychrome sprites and surfaces. HLSL/WGSL: rounded fragment discard on quads, shadows, underlines and all sprites; paths remain rectangular. |
 | `PolychromeSprite::pad2` explicitly aligns the record's tail for WGSL storage arrays. With the rounded mask the record is 152 bytes (38 words), identical across Rust, Metal, native WGSL, WebGL and HLSL. | `crates/gpui/src/scene.rs`, shader files and `crates/gpui_wgpu/src/wgpu_renderer.rs` layout tests | Indirect via image elements | All backends share the same record layout. |
-| `gpui::pattern_dots(color, spacing, radius)` returns a `Background` with `BackgroundTag::Dots = 4`; the style fallback uses its solid color. Spacing and radius are screen-space/device-pixel values. | `crates/gpui/src/color.rs`, `crates/gpui/src/style.rs`, `crates/gpui_apple/src/shaders.metal` (`prepare_fill_color`, `fill_color`) | `views/dot_grid.rs` | Metal dot-grid shader only; WGSL/HLSL have no dots case. |
+| `gpui::pattern_dots(color, spacing, radius)` returns a `Background` with `BackgroundTag::Dots = 4`; the style fallback uses its solid color. Spacing and radius are screen-space/device-pixel values. | `crates/gpui/src/color.rs`, `crates/gpui/src/style.rs`, `crates/gpui_apple/src/shaders.metal` (`prepare_fill_color`, `fill_color`), `crates/gpui_windows/src/shaders.hlsl` and `crates/gpui_wgpu/src/shaders.wgsl` (`prepare_gradient_color`, `gradient_color` tag 4) | `views/dot_grid.rs` | Metal, HLSL and WGSL dot lattice. A backend without the tag-4 case paints an opaque rectangle (the Windows black canvas). |
 | `gpui::ImageTransform { rotation_quarters, flip_h, flip_v }`, `encode()` and `swaps_axes()`; rotation is quarter turns and the packed UV bits are 0–3. | `crates/gpui/src/elements/img.rs`, `crates/gpui/src/scene.rs`; shader files below | `app/primitive/canvas.rs`, `app/crop.rs` | Image sprites: Metal, WGSL, HLSL. |
 | `Img::transform(ImageTransform)` and `Img::crop(Bounds<f32>)`; crop is normalized in displayed (post-transform) orientation. Layout swaps intrinsic axes for 90°/270° rotation; object-fit uses rotated and cropped dimensions. Out-of-bounds crops are clamped; zero-area/identity crops are ignored by `sanitize_crop`. | `crates/gpui/src/elements/img.rs`, `crates/gpui/src/window.rs` | Transform: `app/primitive/canvas.rs`, `app/crop.rs`; crop: `app/primitive/canvas.rs`, `app/grid_view/media.rs` | Image sprites: Metal, WGSL, HLSL. |
 | Cover/None image overflow is folded into the displayed-orientation UV crop instead of an atlas sub-tile. The visible quad gets the corner radii. | `crates/gpui/src/elements/img.rs` (`fold_overflow_into_crop`), `crates/gpui/src/window.rs` | Image cards in `app/primitive/canvas.rs`; video thumbnails in `app/grid_view/media.rs` | Image sprites: Metal, WGSL, HLSL. |
@@ -50,6 +59,7 @@ September merge relocated the shared Metal renderer into `gpui_apple`.
 | `gpui_macos::input_latency::{LatencyCounter, INPUT_QUEUE_AGE, GPU_PRESENT}`; `drain()` returns and resets `(sum, max, count)`. Queue age samples pressed-button mouse moves and scrolls; GPU present measures Metal draw entry (including `next_drawable`) through command-buffer completion. | `crates/gpui_apple/src/input_latency.rs`, `crates/gpui_apple/src/gpui_apple.rs`, `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_macos/src/gpui_macos.rs`, `crates/gpui_macos/src/window.rs` | `services/metrics.rs` | macOS event loop and shared Apple Metal renderer; exported through `gpui_macos`. |
 | Metal `SurfaceBounds { corner_radii, crop }` (no `Eq`) and surface vertex/fragment crop, rounded SDF; polychrome vertex crops then inversely remaps transformed UVs. | `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_apple/src/shaders.metal` | Indirect through `app/grid_view/media.rs` and `app/primitive/canvas.rs` | macOS/Metal. |
 | WGSL and HLSL `PolychromeSprite` add `uv_transform` and crop; vertex shaders crop before applying inverse rotation/flip. WebGL's fixed decoder uses a 38-word sprite stride, matching Rust's 152-byte record. | `crates/gpui_wgpu/src/shaders.wgsl`, `crates/gpui_wgpu/src/shaders_webgl.wgsl`, `crates/gpui_wgpu/src/wgpu_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl` | Indirect through image callers above. | wgpu/WebGL and Windows/HLSL image paths. |
+| Windows title bar: `start_window_move` (via `SC_MOVE`) and `titlebar_double_click` (maximize/restore when resizable) are implemented, and window-control hit testing uses the live cursor position instead of the cached one. The client lets Windows run the native caption move loop and only registers a drag control area. | `crates/gpui_windows/src/window.rs`, `crates/gpui/src/window.rs` | `views/shell.rs` | Windows only; macOS ignores the hit-test callback. |
 
 The image sampling contract is worth checking independently of compilation:
 
@@ -97,8 +107,10 @@ The image sampling contract is worth checking independently of compilation:
   word strides. This does not substitute for Linux/web rendering verification.
 - Rounded **path** masking is Metal-only; HLSL/WGSL paths retain rectangular
   clips. Metal uses antialiased mask coverage; HLSL/WGSL use a hard SDF discard.
-- `pattern_dots` has a Metal shader implementation, not a WGSL/HLSL one.
-  `Surface` painting and the latency counters are macOS-specific.
+- The WGSL/HLSL `pattern_dots` case and the Windows title bar changes were
+  type-checked for `x86_64-pc-windows-msvc` but not shader-compiled (no
+  fxc/dxc/naga run) or rendered on Windows; verify on Windows. `Surface`
+  painting and the latency counters are macOS-specific.
 - The rounded-mask change was compiled/rendered on macOS and WGSL was validated
   with Naga; Windows FXC compilation and Windows runtime rendering still require
   verification on Windows.
@@ -110,7 +122,7 @@ The image sampling contract is worth checking independently of compilation:
 2. Merge the selected `upstream/main` commit into that branch. Resolve
    conflicts against the current crate layout (especially `gpui_apple`), not
    against pre-September file paths. Preserve the five fork-only changes or
-   explicitly document their replacement.
+   explicitly document their replacement, including the Windows parity commit.
 3. Compare the merged tree with the selected upstream commit and re-verify
    every API, call site, crop/layout rule, scene field, shader path, and macOS
    counter above. Check Metal, WGSL, WebGL, and HLSL separately; do not infer
